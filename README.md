@@ -28,6 +28,7 @@
     - [网络与代理](#网络与代理)
     - [关于与更新](#关于与更新)
   - [架构](#架构)
+  - [上游合并锁定](#上游合并锁定)
   - [贡献](#贡献)
   - [支持项目](#支持项目)
   - [许可与声明](#许可与声明)
@@ -183,6 +184,22 @@ npm run android:run         # 轻量 Android（需 Android SDK）
 无自建内容服务器，部署简单，但也受上游接口、页面结构与反爬策略影响；源站改版后解析可能需同步更新。
 
 更细的分层与模块说明见 [`docs/architecture.md`](./docs/architecture.md)。菜单路径与操作步骤见 [`docs/user-guide.md`](./docs/user-guide.md)。
+
+## 上游合并锁定
+
+本 Fork 在根目录新增了 [`.gitattributes`](./.gitattributes)，为本次定制涉及的工作流、应用更新逻辑、Gradle、原生插件、关于页、文档和测试配置设置了 `merge=ours`：
+
+```gitattributes
+<path> merge=ours
+```
+
+当前工作区已配置以下 Git 合并驱动：
+
+```bash
+git config merge.ours.driver true
+```
+
+因此，后续从上游仓库合并时，上述 Fork 定制文件会保留当前仓库版本。其他机器重新 clone 本仓库后，也需要执行一次上述 Git 配置命令；`.gitattributes` 中已注明这一要求。
 
 ## 贡献
 
