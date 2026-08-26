@@ -74,7 +74,7 @@ android {
             if (requestedAbi) {
                 abiFilters requestedAbi
             } else {
-                abiFilters supportedReleaseAbis
+                supportedReleaseAbis.each { abiFilters it }
             }
         }
         aaptOptions {
