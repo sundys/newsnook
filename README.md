@@ -1,8 +1,8 @@
 ﻿# NewsNook（有所闻）
 
-[![License](https://img.shields.io/github/license/t59688/newsnook)](./LICENSE)
-[![Release](https://img.shields.io/github/v/release/t59688/newsnook)](https://github.com/t59688/newsnook/releases)
-[![Issues](https://img.shields.io/github/issues/t59688/newsnook)](https://github.com/t59688/newsnook/issues)
+[![License](https://img.shields.io/github/license/sundys/newsnook)](./LICENSE)
+[![Release](https://img.shields.io/github/v/release/sundys/newsnook)](https://github.com/sundys/newsnook/releases)
+[![Issues](https://img.shields.io/github/issues/sundys/newsnook)](https://github.com/sundys/newsnook/issues)
 [![爱发电](https://img.shields.io/badge/%E7%88%B1%E5%8F%91%E7%94%B5-%E6%94%AF%E6%8C%81%E5%BC%80%E5%8F%91-946CE6)](https://ifdian.net/a/t59688)
 
 本地优先的 Android 新闻阅读客户端：无账号、无后端、无推荐算法。订阅源由你配置，列表与正文由客户端直连上游获取，并在应用内阅读。
@@ -63,26 +63,26 @@
 - **翻译**：云端（Google / Azure / DeepL / DeepLX / OpenAI 兼容）两变体均可用；可翻译正文与列表外文标题；Android ML Kit 与 Bergamot 离线仅完整版（`local` 包）
 - **墨水屏模式**：关闭动画与装饰，文章改为左右点击分页阅读，音量键亦可翻页；配色仍跟随昼读/夜读主题
 - **网络与代理**：App 内支持智能分流、全局代理与直连；国际源可经用户自备代理访问
-- **应用内更新**：检测 GitHub Release；轻量版与完整版可覆盖安装切换
+- **应用内更新**：检测 GitHub Release；同一架构下的轻量版与完整版可覆盖安装切换
 - **双构建变体**：轻量版（cloud，~2 MB，无本地翻译引擎）与完整版（local，含 ML Kit / Bergamot）
 
 ## 安装
 
-发布文件见 [Releases](https://github.com/t59688/newsnook/releases)。两个变体**包名与签名相同**，同一设备安装其中一个即可。安装时可能需允许「安装未知应用」。当前仅提供 Android。
+发布文件见 [Releases](https://github.com/sundys/newsnook/releases)。Release 按 CPU 架构提供独立 APK；请选择与设备匹配的文件。两个变体**包名与签名相同**，同一设备安装其中一个即可。安装时可能需允许「安装未知应用」。当前仅提供 Android。
 
 | 变体 | 大约体积（以 Releases 实际 APK 为准） | 说明 |
 | --- | --- | --- |
 | 轻量版（cloud） | 约 2 MB | 不含 ML Kit / Bergamot；可使用云端 / AI 翻译 |
-| 完整版（local） | 约 60 MB | 含 ML Kit 与 Bergamot；语言模型仍按需下载；Bergamot 当前仅支持 `arm64-v8a` |
+| 完整版（local） | 约 60 MB | 仅提供 `arm64-v8a`；含 ML Kit 与 Bergamot，语言模型仍按需下载 |
 
-只需云端 / AI 翻译时安装轻量版即可。需要本地翻译引擎时安装完整版。
+只需云端 / AI 翻译时安装轻量版即可（提供 `arm64-v8a`、`armeabi-v7a`、`x86_64`）。需要本地翻译引擎时安装完整版（仅 `arm64-v8a`）。APK 文件名为 `newsnook-<version>-<cloud|local>-<abi>-release.apk`。
 
 ## 快速开始
 
 技术栈：React 19 + Vite + TypeScript + Capacitor 8（Android）。
 
 ```bash
-git clone https://github.com/t59688/newsnook.git
+git clone https://github.com/sundys/newsnook.git
 cd newsnook
 npm install
 npm run dev                 # Web 开发
@@ -172,7 +172,7 @@ npm run android:run         # 轻量 Android（需 Android SDK）
 
 ### 关于与更新
 
-入口：**我的 → 关于有所闻**。可查看版本与更新说明；有新版本时会提示安装。轻量版与完整版包名与签名相同，可在关于页下载**当前版本号**对应的另一变体 APK 并覆盖安装。
+入口：**我的 → 关于有所闻**。可查看版本与更新说明；有新版本时会提示安装。轻量版与完整版包名与签名相同；关于页会按设备 ABI 下载**当前版本号**对应的 APK，并可在同一架构下覆盖安装另一变体。
 
 ## 架构
 
@@ -186,7 +186,7 @@ npm run android:run         # 轻量 Android（需 Android SDK）
 
 ## 贡献
 
-欢迎通过 [Issue](https://github.com/t59688/newsnook/issues) 反馈：源失效、正文提取错误、翻译问题、崩溃、新源建议、交互建议。
+欢迎通过 [Issue](https://github.com/sundys/newsnook/issues) 反馈：源失效、正文提取错误、翻译问题、崩溃、新源建议、交互建议。
 
 请尽量附上：Android 版本、应用版本、设备型号、信源名称、文章链接、截图或日志、复现步骤。
 

@@ -1,26 +1,36 @@
 import { CapacitorHttp } from '@capacitor/core'
 
 import { isNewerVersion, normalizeTagVersion } from './semver'
-import type { AppUpdateChannel, LatestReleaseInfo, UpdateCheckResult } from './types'
+import type { AppUpdateAbi, AppUpdateChannel, LatestReleaseInfo, UpdateCheckResult } from './types'
 
 export type FetchReleaseApkResult =
   | { status: 'ok'; release: LatestReleaseInfo }
-  | { status: 'no-asset'; version: string; channel: AppUpdateChannel }
+  | { status: 'no-asset'; version: string; channel: AppUpdateChannel; abi: AppUpdateAbi }
   | { status: 'error'; message: string }
 
-export function buildApkFileName(version: string, channel: AppUpdateChannel): string {
-  return `newsnook-${version}-${channel}-release.apk`
+export function buildApkFileName(
+  version: string,
+  channel: AppUpdateChannel,
+  abi: AppUpdateAbi,
+): string {
+  return `newsnook-${version}-${channel}-${abi}-release.apk`
 }
 
 export function pickReleaseAsset(
   assets: { name: string; browser_download_url: string }[],
   version: string,
   channel: AppUpdateChannel,
+  abi: AppUpdateAbi,
 ): { url: string; fileName: string } | null {
-  const fileName = buildApkFileName(version, channel)
+  const fileName = buildApkFileName(version, channel, abi)
   const hit = assets.find((a) => a.name === fileName)
-  if (!hit?.browser_download_url) return null
-  return { url: hit.browser_download_url, fileName }
+  if (hit?.browser_download_url) return { url: hit.browser_download_url, fileName }
+
+  // 兼容 fork 切换前仍保留旧命名的历史 Release。新发布必须使用 ABI 文件名。
+  const legacyFileName = `newsnook-${version}-${channel}-release.apk`
+  const legacyHit = assets.find((a) => a.name === legacyFileName)
+  if (!legacyHit?.browser_download_url) return null
+  return { url: legacyHit.browser_download_url, fileName: legacyFileName }
 }
 
 export function truncateReleaseNotes(body: string | null | undefined, maxLines = 8): string {
@@ -31,8 +41,8 @@ export function truncateReleaseNotes(body: string | null | undefined, maxLines =
   return `${lines.slice(0, maxLines).join('\n')}\n…`
 }
 
-const RELEASES_LATEST = 'https://api.github.com/repos/t59688/newsnook/releases/latest'
-const RELEASES_TAG_PREFIX = 'https://api.github.com/repos/t59688/newsnook/releases/tags/'
+const RELEASES_LATEST = 'https://api.github.com/repos/sundys/newsnook/releases/latest'
+const RELEASES_TAG_PREFIX = 'https://api.github.com/repos/sundys/newsnook/releases/tags/'
 
 const GITHUB_HEADERS = {
   Accept: 'application/vnd.github+json',
@@ -41,7 +51,7 @@ const GITHUB_HEADERS = {
 
 export function releaseTagUrl(version: string): string {
   const normalized = normalizeTagVersion(version)
-  return `https://github.com/t59688/newsnook/releases/tag/v${normalized}`
+  return `https://github.com/sundys/newsnook/releases/tag/v${normalized}`
 }
 
 export type ReleaseNotesResult =
@@ -84,6 +94,7 @@ export async function fetchReleaseNotes(version: string): Promise<ReleaseNotesRe
 export async function fetchLatestRelease(
   localVersion: string,
   channel: AppUpdateChannel,
+  abi: AppUpdateAbi,
 ): Promise<UpdateCheckResult> {
   try {
     const response = await CapacitorHttp.get({
@@ -102,9 +113,9 @@ export async function fetchLatestRelease(
         remoteVersion: remoteVersion || localVersion,
       }
     }
-    const picked = pickReleaseAsset(data.assets ?? [], remoteVersion, channel)
+    const picked = pickReleaseAsset(data.assets ?? [], remoteVersion, channel, abi)
     if (!picked) {
-      return { status: 'no-asset', localVersion, remoteVersion, channel }
+      return { status: 'no-asset', localVersion, remoteVersion, channel, abi }
     }
     return {
       status: 'available',
@@ -116,6 +127,7 @@ export async function fetchLatestRelease(
         apkUrl: picked.url,
         apkFileName: picked.fileName,
         channel,
+        abi,
       },
     }
   } catch (error) {
@@ -126,7 +138,7 @@ export async function fetchLatestRelease(
   }
 }
 
-/** 从 tag Release JSON 解析指定渠道 APK（不发起网络请求） */
+/** 从 tag Release JSON 解析指定渠道和 ABI 的 APK（不发起网络请求） */
 export function releaseApkFromTagPayload(
   data: {
     tag_name?: unknown
@@ -135,6 +147,7 @@ export function releaseApkFromTagPayload(
   },
   version: string,
   channel: AppUpdateChannel,
+  abi: AppUpdateAbi,
 ): FetchReleaseApkResult {
   const normalized = normalizeTagVersion(version)
   if (!normalized) return { status: 'error', message: '版本号无效' }
@@ -144,8 +157,8 @@ export function releaseApkFromTagPayload(
       browser_download_url: String(a.browser_download_url ?? ''),
     }))
     .filter((a) => a.name && a.browser_download_url)
-  const picked = pickReleaseAsset(assets, normalized, channel)
-  if (!picked) return { status: 'no-asset', version: normalized, channel }
+  const picked = pickReleaseAsset(assets, normalized, channel, abi)
+  if (!picked) return { status: 'no-asset', version: normalized, channel, abi }
   return {
     status: 'ok',
     release: {
@@ -155,14 +168,16 @@ export function releaseApkFromTagPayload(
       apkUrl: picked.url,
       apkFileName: picked.fileName,
       channel,
+      abi,
     },
   }
 }
 
-/** 拉取指定版本 Release 上某一渠道的 APK（同版本切换用，不与 latest 比较） */
+/** 拉取指定版本 Release 上某一渠道和 ABI 的 APK（同版本切换用，不与 latest 比较） */
 export async function fetchReleaseApkForChannel(
   version: string,
   channel: AppUpdateChannel,
+  abi: AppUpdateAbi,
 ): Promise<FetchReleaseApkResult> {
   const normalized = normalizeTagVersion(version)
   if (!normalized) return { status: 'error', message: '版本号无效' }
@@ -178,7 +193,7 @@ export async function fetchReleaseApkForChannel(
       return { status: 'error', message: `GitHub HTTP ${response.status}` }
     }
     const data = typeof response.data === 'string' ? JSON.parse(response.data) : response.data
-    return releaseApkFromTagPayload(data ?? {}, normalized, channel)
+    return releaseApkFromTagPayload(data ?? {}, normalized, channel, abi)
   } catch (error) {
     return {
       status: 'error',

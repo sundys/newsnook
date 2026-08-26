@@ -16,15 +16,36 @@ const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const androidRoot = join(projectRoot, 'android')
 const format = process.argv[2]
 const flavorArgument = process.argv[3] ?? 'all'
+const abiArgument = process.argv[4] ?? 'all'
 const supportedFlavors = ['cloud', 'local']
+const supportedAbis = ['arm64-v8a', 'armeabi-v7a', 'x86_64']
+const localSupportedAbis = ['arm64-v8a']
 
 if (format !== 'apk' && format !== 'aab') {
-  throw new Error('Usage: node scripts/android-build.mjs <apk|aab> [cloud|local|all]')
+  throw new Error('Usage: node scripts/android-build.mjs <apk|aab> [cloud|local|all] [arm64-v8a|armeabi-v7a|x86_64|all]')
 }
 if (flavorArgument !== 'all' && !supportedFlavors.includes(flavorArgument)) {
   throw new Error('Flavor must be cloud, local, or all.')
 }
+if (abiArgument !== 'all' && !supportedAbis.includes(abiArgument)) {
+  throw new Error('ABI must be arm64-v8a, armeabi-v7a, x86_64, or all.')
+}
+if (format === 'aab' && abiArgument !== 'all') {
+  throw new Error('AAB is a Play distribution bundle and must be built with ABI=all.')
+}
+
 const flavors = flavorArgument === 'all' ? supportedFlavors : [flavorArgument]
+const targets =
+  format === 'aab'
+    ? flavors.map((flavor) => ({ flavor, abi: null }))
+    : flavors.flatMap((flavor) => {
+        const allowedAbis = flavor === 'local' ? localSupportedAbis : supportedAbis
+        const abis = abiArgument === 'all' ? allowedAbis : [abiArgument]
+        if (abis.some((abi) => !allowedAbis.includes(abi))) {
+          throw new Error(`The ${flavor} flavor only supports: ${allowedAbis.join(', ')}.`)
+        }
+        return abis.map((abi) => ({ flavor, abi }))
+      })
 
 const env = loadAndroidEnv(projectRoot)
 const requiredSigningVariables = [
@@ -43,7 +64,7 @@ if (!existsSync(env.NEWSNOOK_KEYSTORE_FILE)) {
   throw new Error(`Release keystore not found: ${env.NEWSNOOK_KEYSTORE_FILE}`)
 }
 
-if (flavors.includes('local')) {
+if (targets.some(({ flavor }) => flavor === 'local')) {
   const bergamotCmake = join(
     androidRoot,
     'app',
@@ -61,79 +82,49 @@ if (flavors.includes('local')) {
       [join(projectRoot, 'scripts', 'bergamot-init.mjs')],
       { stdio: 'inherit' },
     )
-    if (initResult.status !== 0) {
-      process.exit(initResult.status ?? 1)
-    }
+    if (initResult.status !== 0) process.exit(initResult.status ?? 1)
   }
-}
-
-const taskPrefix = format === 'apk' ? 'assemble' : 'bundle'
-const tasks = flavors.map(
-  (flavor) => `${taskPrefix}${flavor[0].toUpperCase()}${flavor.slice(1)}Release`,
-)
-const gradleWrapperJar = join(
-  androidRoot,
-  'gradle',
-  'wrapper',
-  'gradle-wrapper.jar',
-)
-const result = spawnSync(
-  javaExecutable(env.JAVA_HOME),
-  [
-    '-Dorg.gradle.appname=gradlew',
-    '-classpath',
-    '',
-    '-jar',
-    gradleWrapperJar,
-    ...tasks,
-    '--no-daemon',
-    '--console=plain',
-    '--stacktrace',
-  ],
-  {
-    cwd: androidRoot,
-    env,
-    stdio: 'inherit',
-  },
-)
-if (result.status !== 0) {
-  process.exit(result.status ?? 1)
 }
 
 const packageJson = JSON.parse(readFileSync(join(projectRoot, 'package.json'), 'utf8'))
 const outputDirectory = join(projectRoot, 'artifacts', 'android')
 mkdirSync(outputDirectory, { recursive: true })
 const apksignerJar = format === 'apk' ? findApksignerJar(env.ANDROID_HOME) : null
+const taskPrefix = format === 'apk' ? 'assemble' : 'bundle'
 
-for (const flavor of flavors) {
+for (const { flavor, abi } of targets) {
+  const task = `${taskPrefix}${flavor[0].toUpperCase()}${flavor.slice(1)}Release`
+  const targetLabel = abi ?? 'all ABI'
+  console.log(`Building ${flavor} ${targetLabel} ${format.toUpperCase()}…`)
+  const result = spawnSync(
+    javaExecutable(env.JAVA_HOME),
+    [
+      '-Dorg.gradle.appname=gradlew',
+      '-classpath',
+      '',
+      '-jar',
+      join(androidRoot, 'gradle', 'wrapper', 'gradle-wrapper.jar'),
+      task,
+      ...(abi ? [`-PnewsnookAbi=${abi}`] : []),
+      '--no-daemon',
+      '--console=plain',
+      '--stacktrace',
+    ],
+    { cwd: androidRoot, env, stdio: 'inherit' },
+  )
+  if (result.status !== 0) process.exit(result.status ?? 1)
+
   const source =
     format === 'apk'
-      ? join(
-          androidRoot,
-          'app',
-          'build',
-          'outputs',
-          'apk',
-          flavor,
-          'release',
-          `app-${flavor}-release.apk`,
-        )
-      : join(
-          androidRoot,
-          'app',
-          'build',
-          'outputs',
-          'bundle',
-          `${flavor}Release`,
-          `app-${flavor}-release.aab`,
-        )
+      ? join(androidRoot, 'app', 'build', 'outputs', 'apk', flavor, 'release', `app-${flavor}-release.apk`)
+      : join(androidRoot, 'app', 'build', 'outputs', 'bundle', `${flavor}Release`, `app-${flavor}-release.aab`)
   if (!existsSync(source)) {
     throw new Error(`Gradle completed but the expected artifact is missing: ${source}`)
   }
 
   const destination = join(
     outputDirectory,
-    `newsnook-${packageJson.version}-${flavor}-release.${format}`,
+    `newsnook-${packageJson.version}-${flavor}${abi ? `-${abi}` : ''}-release.${format}`,
   )
   copyFileSync(source, destination)
 
@@ -142,22 +133,20 @@ for (const flavor of flavors) {
       javaExecutable(env.JAVA_HOME),
       ['-jar', apksignerJar, 'verify', '--verbose', '--print-certs', destination],
       env,
-      `${flavor} APK signature verification failed`,
+      `${flavor} ${targetLabel} APK signature verification failed`,
     )
   } else {
     verify(
       javaExecutable(env.JAVA_HOME, 'jarsigner'),
       ['-verify', '-certs', destination],
       env,
-      `${flavor} AAB signature verification failed`,
+      `${flavor} ${targetLabel} AAB signature verification failed`,
       true,
     )
   }
 
   const sizeMiB = (statSync(destination).size / 1024 / 1024).toFixed(2)
-  console.log(
-    `Android ${flavor} ${format.toUpperCase()} ready: ${destination} (${sizeMiB} MiB)`,
-  )
+  console.log(`Android ${flavor} ${targetLabel} ${format.toUpperCase()} ready: ${destination} (${sizeMiB} MiB)`)
 }
 
 function findApksignerJar(androidHome) {

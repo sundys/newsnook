@@ -1,0 +1,25 @@
+# FORK_LOCK: preserve NewsNook fork customizations when merging the upstream repository.
+# This attribute requires `merge.ours.driver=true`; configured in this checkout by the fork setup.
+.github/workflows/android-manual-build.yml merge=ours
+.github/workflows/android-release.yml merge=ours
+CONTRIBUTING.md merge=ours
+README.md merge=ours
+SECURITY.md merge=ours
+android/app/build.gradle merge=ours
+android/app/src/main/java/com/aizeek/newsnook/AppUpdatePlugin.java merge=ours
+docs/android-build.md merge=ours
+docs/superpowers/plans/2026-08-05-android-in-app-update.md merge=ours
+docs/superpowers/specs/2026-08-05-android-in-app-update-design.md merge=ours
+docs/superpowers/specs/2026-08-07-flavor-switch-design.md merge=ours
+docs/superpowers/specs/2026-08-17-modern-ui-style-design.md merge=ours
+.gitattributes merge=ours
+docs/user-guide.md merge=ours
+scripts/android-build.mjs merge=ours
+scripts/app-update.test.ts merge=ours
+src/features/appUpdate/github.ts merge=ours
+src/features/appUpdate/native.ts merge=ours
+src/features/appUpdate/service.ts merge=ours
+src/features/appUpdate/types.ts merge=ours
+src/features/appUpdate/useAppUpdate.ts merge=ours
+src/features/oss/licenses.ts merge=ours
+src/screens/settings/AboutScreen.tsx merge=ours

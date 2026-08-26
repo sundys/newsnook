@@ -73,7 +73,7 @@ fetchReleaseApkForChannel(
 >
 ```
 
-- URL：`https://api.github.com/repos/t59688/newsnook/releases/tags/v{version}`
+- URL：`https://api.github.com/repos/sundys/newsnook/releases/tags/v{version}`
 - 成功时 `release.channel` 为目标渠道；`version` 为当前版本（非「更新」）
 - `notes` 可截断或空串；切换确认主要靠对话框文案，不依赖更新日志
 

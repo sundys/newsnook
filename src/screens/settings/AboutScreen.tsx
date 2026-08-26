@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import {
-  BookOpen,
   Check,
   Compass,
   Copy,
@@ -44,9 +43,7 @@ const ABOUT_CONFIG = {
   version: __APP_VERSION__,
   build: __APP_BUILD__,
   subtitle: '静态源新闻阅读客户端',
-  repoUrl: 'https://github.com/t59688/newsnook',
-  wechatArticleUrl: 'https://mp.weixin.qq.com/s/d8fJvLQ4o7wjr_4YBXGgqQ',
-  wechatArticleTitle: '[有所闻]',
+  repoUrl: 'https://github.com/sundys/newsnook',
 }
 
 function GithubIcon({ size = 18, className = '' }: { size?: number; className?: string }) {
@@ -280,31 +277,6 @@ export function AboutScreen({
 
               <ExternalLink size={14} strokeWidth={1.5} className="shrink-0 text-paper-faint" />
             </div>
-          </li>
-
-          {/* 公众号 */}
-          <li className="transition-colors hover:bg-ink-raised/30 active:bg-ink-raised/50">
-            <button
-              type="button"
-              onClick={() => openExternalUrl(ABOUT_CONFIG.wechatArticleUrl)}
-              className="page-x flex w-full items-center gap-3.5 py-4 text-left"
-            >
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-ink-raised/60 text-paper">
-                <BookOpen size={18} strokeWidth={1.75} />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-[14px] font-medium text-paper">公众号</span>
-                  <span className="inline-flex items-center rounded bg-cinnabar/10 px-1.5 py-0.5 font-mono text-[9px] text-cinnabar">
-                    专栏
-                  </span>
-                </div>
-                <p className="mt-0.5 truncate text-[11px] text-paper-faint">
-                  {ABOUT_CONFIG.wechatArticleTitle}
-                </p>
-              </div>
-              <ExternalLink size={14} strokeWidth={1.5} className="shrink-0 text-paper-faint" />
-            </button>
           </li>
 
           {/* 开源许可 */}

@@ -12,6 +12,16 @@ on:
           - local
           - cloud
         default: all
+      abi:
+        description: 'APK 架构 (all: cloud 全部架构 + local arm64；local 仅支持 arm64-v8a)'
+        required: true
+        type: choice
+        options:
+          - all
+          - arm64-v8a
+          - armeabi-v7a
+          - x86_64
+        default: all
       format:
         description: '产物类型 (apk, aab, all)'
         required: true
@@ -84,14 +94,16 @@ jobs:
         if: ${{ inputs.flavor == 'all' || inputs.flavor == 'local' }}
         run: npm run bergamot:init
 
-      - name: Build signed APK
+      - name: Build signed ABI-specific APK
         if: ${{ inputs.format == 'apk' || inputs.format == 'all' }}
         run: |
-          if [ "${{ inputs.flavor }}" = "all" ]; then
-            npm run android:apk
-          else
-            npm run "android:apk:${{ inputs.flavor }}"
+          FLAVOR="${{ inputs.flavor }}"
+          ABI="${{ inputs.abi }}"
+          # local 的 Bergamot 原生库仅能在 arm64-v8a 构建；非 arm64 的 all 请求只产 cloud APK。
+          if [ "$FLAVOR" = "all" ] && [ "$ABI" != "all" ] && [ "$ABI" != "arm64-v8a" ]; then
+            FLAVOR="cloud"
           fi
+          node scripts/android-build.mjs apk "$FLAVOR" "$ABI"
 
       - name: Build signed AAB
         if: ${{ inputs.format == 'aab' || inputs.format == 'all' }}

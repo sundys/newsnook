@@ -14,7 +14,7 @@
 - 仅 `Capacitor.getPlatform() === 'android'`；Web / iOS no-op
 - 稍后 snooze = **2 小时**；启动检查节流 = **12 小时**
 - Asset：`newsnook-<ver>-{cloud|local}-release.apk`，渠道由 `isLocalTranslationAvailable()` 决定
-- Release API：`https://api.github.com/repos/t59688/newsnook/releases/latest`
+- Release API：`https://api.github.com/repos/sundys/newsnook/releases/latest`
 - 下载 URL 仅允许 `github.com` / `objects.githubusercontent.com`
 - 不改发版 workflow、产物命名、强制更新、签名指纹校验
 - 未经用户明确要求不执行 `git commit` / `git push`
@@ -472,7 +472,7 @@ export const AppUpdateNative = registerPlugin<AppUpdatePlugin>('AppUpdate')
 
 ```ts
 const RELEASES_LATEST =
-  'https://api.github.com/repos/t59688/newsnook/releases/latest'
+  'https://api.github.com/repos/sundys/newsnook/releases/latest'
 
 export async function fetchLatestRelease(
   localVersion: string,

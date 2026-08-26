@@ -79,7 +79,8 @@ jobs:
       - name: Initialize Bergamot native engine
         run: npm run bergamot:init
 
-      - name: Build signed APKs (cloud + local)
+      # Fork lock: the build script invokes Gradle once per ABI and keeps APK assets separate.
+      - name: Build signed ABI-specific APKs
         run: npm run android:apk
 
       - name: Build signed AABs (cloud + local)
@@ -98,7 +99,9 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |
-            artifacts/android/newsnook-*-cloud-release.apk
-            artifacts/android/newsnook-*-local-release.apk
+            artifacts/android/newsnook-*-cloud-arm64-v8a-release.apk
+            artifacts/android/newsnook-*-cloud-armeabi-v7a-release.apk
+            artifacts/android/newsnook-*-cloud-x86_64-release.apk
+            artifacts/android/newsnook-*-local-arm64-v8a-release.apk
             artifacts/android/newsnook-*-cloud-release.aab
             artifacts/android/newsnook-*-local-release.aab

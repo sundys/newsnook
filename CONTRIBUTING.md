@@ -17,7 +17,7 @@
 
 ## 报告问题
 
-请用 [Issue](https://github.com/t59688/newsnook/issues) 反馈，并尽量附上：
+请用 [Issue](https://github.com/sundys/newsnook/issues) 反馈，并尽量附上：
 
 - 应用版本（Releases 中的 tag 或关于页版本号）
 - Android 版本与设备型号
@@ -33,7 +33,7 @@
 - Android SDK（API 36、Build Tools 36）与 JDK 21（仅 Android 构建需要）
 
 ```bash
-git clone https://github.com/t59688/newsnook.git
+git clone https://github.com/sundys/newsnook.git
 cd newsnook
 npm install
 npm run dev

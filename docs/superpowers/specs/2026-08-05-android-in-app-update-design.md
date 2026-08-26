@@ -6,7 +6,7 @@
 
 ## 1. 目标
 
-用户安装侧载 APK 后，能发现 [GitHub Releases](https://github.com/t59688/newsnook/releases) 上的新版本：确认后后台下载，通知栏显示进度，下载完成自动调起系统安装器。渠道（cloud / local）与当前安装一致。
+用户安装侧载 APK 后，能发现 [GitHub Releases](https://github.com/sundys/newsnook/releases) 上的新版本：确认后后台下载，通知栏显示进度，下载完成自动调起系统安装器。渠道（cloud / local）与当前安装一致。
 
 ## 2. 方案
 
@@ -25,7 +25,7 @@
 
 ### 3.1 数据源
 
-- API：`GET https://api.github.com/repos/t59688/newsnook/releases/latest`
+- API：`GET https://api.github.com/repos/sundys/newsnook/releases/latest`
 - 本地版本：`__APP_VERSION__`（与根目录 `package.json` / APK `versionName` 同源）
 - 远端版本：`tag_name` 去掉前缀 `v` 后 semver 比较；仅当远端 **严格大于** 本地才视为有更新
 - Asset：按 `isLocalTranslationAvailable()` 选择  

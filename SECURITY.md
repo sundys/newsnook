@@ -2,7 +2,7 @@
 
 ## 支持范围
 
-安全修复优先针对仓库默认分支，以及 [Releases](https://github.com/t59688/newsnook/releases) 中仍在分发的最近版本。
+安全修复优先针对仓库默认分支，以及 [Releases](https://github.com/sundys/newsnook/releases) 中仍在分发的最近版本。
 
 NewsNook 是本地优先、无自建业务后端的客户端。以下情况通常**不**视为本项目漏洞（但仍欢迎通过普通 Issue 反馈产品问题）：
 
@@ -14,7 +14,7 @@ NewsNook 是本地优先、无自建业务后端的客户端。以下情况通�
 
 若你发现可能被利用的安全问题（例如本地数据越权读取、恶意源导致的脚本注入、依赖供应链风险等），请：
 
-1. 优先通过 GitHub 的 **[Private vulnerability reporting](https://github.com/t59688/newsnook/security/advisories/new)**（若已启用）提交；或
+1. 优先通过 GitHub 的 **[Private vulnerability reporting](https://github.com/sundys/newsnook/security/advisories/new)**（若已启用）提交；或
 2. 开一个 Issue，标题加上 `[security]`，**不要**在公开描述中写出可复现的利用细节；在评论中说明可私下联系的方式
 
 请尽量包含：影响版本、复现步骤、预期与实际行为、以及你认为的影响面。

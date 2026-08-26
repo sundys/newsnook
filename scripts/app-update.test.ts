@@ -40,22 +40,55 @@ console.log('✓ semver ok')
 
 console.log('--- app-update asset / gate ---')
 
-assert.equal(buildApkFileName('1.3.9', 'cloud'), 'newsnook-1.3.9-cloud-release.apk')
-assert.equal(buildApkFileName('1.3.9', 'local'), 'newsnook-1.3.9-local-release.apk')
+assert.equal(
+  buildApkFileName('1.3.9', 'cloud', 'arm64-v8a'),
+  'newsnook-1.3.9-cloud-arm64-v8a-release.apk',
+)
+assert.equal(
+  buildApkFileName('1.3.9', 'local', 'arm64-v8a'),
+  'newsnook-1.3.9-local-arm64-v8a-release.apk',
+)
 
 const assets = [
-  { name: 'newsnook-1.3.9-cloud-release.apk', browser_download_url: 'https://github.com/x/cloud.apk' },
-  { name: 'newsnook-1.3.9-local-release.apk', browser_download_url: 'https://github.com/x/local.apk' },
+  {
+    name: 'newsnook-1.3.9-cloud-arm64-v8a-release.apk',
+    browser_download_url: 'https://github.com/x/cloud.apk',
+  },
+  {
+    name: 'newsnook-1.3.9-local-arm64-v8a-release.apk',
+    browser_download_url: 'https://github.com/x/local.apk',
+  },
 ]
-assert.deepEqual(pickReleaseAsset(assets, '1.3.9', 'local'), {
+assert.deepEqual(pickReleaseAsset(assets, '1.3.9', 'local', 'arm64-v8a'), {
   url: 'https://github.com/x/local.apk',
-  fileName: 'newsnook-1.3.9-local-release.apk',
+  fileName: 'newsnook-1.3.9-local-arm64-v8a-release.apk',
 })
-assert.equal(pickReleaseAsset(assets, '1.3.9', 'cloud')?.fileName, 'newsnook-1.3.9-cloud-release.apk')
-assert.equal(pickReleaseAsset([], '1.3.9', 'cloud'), null)
+assert.equal(
+  pickReleaseAsset(assets, '1.3.9', 'cloud', 'arm64-v8a')?.fileName,
+  'newsnook-1.3.9-cloud-arm64-v8a-release.apk',
+)
+assert.equal(
+  buildApkFileName('1.3.9', 'cloud', 'armeabi-v7a'),
+  'newsnook-1.3.9-cloud-armeabi-v7a-release.apk',
+)
+assert.equal(
+  buildApkFileName('1.3.9', 'cloud', 'x86_64'),
+  'newsnook-1.3.9-cloud-x86_64-release.apk',
+)
+const legacyAssets = [
+  {
+    name: 'newsnook-1.3.9-cloud-release.apk',
+    browser_download_url: 'https://github.com/x/cloud-legacy.apk',
+  },
+]
+assert.deepEqual(pickReleaseAsset(legacyAssets, '1.3.9', 'cloud', 'x86_64'), {
+  url: 'https://github.com/x/cloud-legacy.apk',
+  fileName: 'newsnook-1.3.9-cloud-release.apk',
+})
+assert.equal(pickReleaseAsset([], '1.3.9', 'cloud', 'arm64-v8a'), null)
 
-assert.equal(releaseTagUrl('1.3.9'), 'https://github.com/t59688/newsnook/releases/tag/v1.3.9')
-assert.equal(releaseTagUrl('v1.3.9'), 'https://github.com/t59688/newsnook/releases/tag/v1.3.9')
+assert.equal(releaseTagUrl('1.3.9'), 'https://github.com/sundys/newsnook/releases/tag/v1.3.9')
+assert.equal(releaseTagUrl('v1.3.9'), 'https://github.com/sundys/newsnook/releases/tag/v1.3.9')
 
 const notes = truncateReleaseNotes('a\nb\nc\nd\ne\nf\ng\nh\ni\nj')
 assert.equal(notes.split('\n').length, 9)
@@ -156,25 +189,25 @@ const payload = {
   body: 'x',
   assets: [
     {
-      name: 'newsnook-1.4.6-cloud-release.apk',
+      name: 'newsnook-1.4.6-cloud-arm64-v8a-release.apk',
       browser_download_url: 'https://example.com/cloud.apk',
     },
   ],
 }
-const noLocal = releaseApkFromTagPayload(payload, '1.4.6', 'local')
+const noLocal = releaseApkFromTagPayload(payload, '1.4.6', 'local', 'arm64-v8a')
 assert.equal(noLocal.status, 'no-asset')
 if (noLocal.status === 'no-asset') {
   assert.equal(noLocal.version, '1.4.6')
   assert.equal(noLocal.channel, 'local')
 }
-const cloud = releaseApkFromTagPayload(payload, '1.4.6', 'cloud')
+const cloud = releaseApkFromTagPayload(payload, '1.4.6', 'cloud', 'arm64-v8a')
 assert.equal(cloud.status, 'ok')
 if (cloud.status === 'ok') {
-  assert.equal(cloud.release.apkFileName, 'newsnook-1.4.6-cloud-release.apk')
+  assert.equal(cloud.release.apkFileName, 'newsnook-1.4.6-cloud-arm64-v8a-release.apk')
   assert.equal(cloud.release.channel, 'cloud')
   assert.equal(cloud.release.apkUrl, 'https://example.com/cloud.apk')
 }
-const badVer = releaseApkFromTagPayload(payload, '', 'cloud')
+const badVer = releaseApkFromTagPayload(payload, '', 'cloud', 'arm64-v8a')
 assert.equal(badVer.status, 'error')
 
 console.log('✓ flavor switch api ok')

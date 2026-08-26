@@ -29,6 +29,12 @@ def derivedVersionCode =
 // 仅当 Play 需要「同名 versionName 再提一次 versionCode」时才用环境变量覆盖
 def appVersionCode = Integer.parseInt(System.getenv("NEWSNOOK_VERSION_CODE") ?: "${derivedVersionCode}")
 def appVersionName = System.getenv("NEWSNOOK_VERSION_NAME") ?: packageVersion
+// Fork lock: GitHub Actions passes one ABI per APK so each Release asset can be installed directly.
+def requestedAbi = (findProperty("newsnookAbi") ?: "").toString().trim()
+def supportedReleaseAbis = ["arm64-v8a", "armeabi-v7a", "x86_64"]
+if (requestedAbi && !supportedReleaseAbis.contains(requestedAbi)) {
+    throw new GradleException("Unsupported newsnookAbi '${requestedAbi}'. Expected one of: ${supportedReleaseAbis.join(', ')}")
+}
 
 android {
     namespace = "com.aizeek.newsnook"
@@ -64,6 +70,13 @@ android {
         versionCode appVersionCode
         versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        ndk {
+            if (requestedAbi) {
+                abiFilters requestedAbi
+            } else {
+                abiFilters supportedReleaseAbis
+            }
+        }
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61

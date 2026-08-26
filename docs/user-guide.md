@@ -26,20 +26,20 @@
 
 ## 安装与启动
 
-发布包见 [Releases](https://github.com/t59688/newsnook/releases)。两个变体**包名与签名相同**，同一设备只需安装其中一个。
+发布包见 [Releases](https://github.com/sundys/newsnook/releases)。Release 按 CPU 架构提供独立 APK；请选择与设备匹配的文件。两个变体**包名与签名相同**，同一设备只需安装其中一个。
 
-| 变体 | 大约体积（以 [Releases](https://github.com/t59688/newsnook/releases) 实际 APK 为准） | 说明 |
+| 变体 | 大约体积（以 [Releases](https://github.com/sundys/newsnook/releases) 实际 APK 为准） | 说明 |
 | --- | --- | --- |
 | 轻量版（云端） | 约 2 MB | 不含本地翻译引擎；可使用云端翻译（Google / Azure / DeepL / DeepLX / AI） |
-| 完整版（local） | 约 60 MB | 含 Android 本地翻译（ML Kit）与 Bergamot；语言模型按需下载；Bergamot 当前仅支持 `arm64-v8a` |
+| 完整版（local） | 约 60 MB | 仅提供 `arm64-v8a`；含 Android 本地翻译（ML Kit）与 Bergamot，语言模型按需下载 |
 
 步骤：
 
-1. 在 Releases 下载对应 APK。
+1. 在 Releases 下载与设备 ABI 对应的 APK：绝大多数真机选择 `arm64-v8a`；旧 32 位设备选择 `armeabi-v7a`；x86_64 用于模拟器。
 2. 若系统提示，允许「安装未知应用」。
 3. 安装并打开应用。
 
-只需云端 / AI 翻译时，安装轻量版即可。需要 ML Kit 或 Bergamot 离线翻译时，安装完整版。
+只需云端 / AI 翻译时，安装轻量版即可（提供 `arm64-v8a`、`armeabi-v7a`、`x86_64`）。需要 ML Kit 或 Bergamot 离线翻译时，安装完整版（仅 `arm64-v8a`）。
 
 ## 主界面：速闻
 
@@ -536,4 +536,4 @@ Android 应用内可打开 **仅 Wi-Fi 自动加载图片和视频**（默认关
 
 **如何反馈问题？**
 
-- 到 [GitHub Issues](https://github.com/t59688/newsnook/issues) 提交。尽量附上：Android 版本、应用版本、设备型号、信源名称、文章链接、截图或日志、复现步骤。
+- 到 [GitHub Issues](https://github.com/sundys/newsnook/issues) 提交。尽量附上：Android 版本、应用版本、设备型号、信源名称、文章链接、截图或日志、复现步骤。

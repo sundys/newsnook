@@ -20,6 +20,7 @@ import {
   openInstallSettings,
   resolveChannel,
   resolveOppositeChannel,
+  resolveUpdateAbi,
   setManualMessage,
   subscribeAppUpdateUi,
 } from './service'
@@ -353,7 +354,11 @@ export function useAppUpdate({ settingsOpen }: Options) {
     const target = resolveOppositeChannel(resolveChannel())
     setFlavorBusy(true)
     setFlavorHint('正在查找安装包…')
-    const result = await fetchReleaseApkForChannel(__APP_VERSION__, target)
+    const result = await fetchReleaseApkForChannel(
+      __APP_VERSION__,
+      target,
+      await resolveUpdateAbi(),
+    )
     setFlavorBusy(false)
     if (result.status === 'no-asset') {
       setFlavorHint('当前版本暂无对应安装包')

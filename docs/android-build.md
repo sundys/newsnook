@@ -41,7 +41,7 @@ NEWSNOOK_KEY_PASSWORD
 
 ## 构建 Android
 
-默认同时生成两种签名 Release APK：
+默认生成按 ABI 拆分的签名 Release APK：cloud 变体分别生成 `arm64-v8a`、`armeabi-v7a`、`x86_64`，local 变体只生成 `arm64-v8a`：
 
 ```bash
 npm run android:apk
@@ -53,7 +53,7 @@ npm run android:apk
 npm run android:aab
 ```
 
-两个命令都会自动完成 Web 生产构建、Capacitor 同步、Gradle Release 构建、R8 压缩、资源裁剪和签名校验。
+两个命令都会自动完成 Web 生产构建、Capacitor 同步、Gradle Release 构建、R8 压缩、资源裁剪和签名校验。APK 按 ABI 逐个调用 Gradle，避免把多个架构混在同一个可下载安装包中；AAB 仍为 Play 使用的全 ABI bundle。
 
 | 变体 | 本地翻译 | 设置中的离线入口 | 用途 |
 |---|---|---|---|
@@ -79,17 +79,19 @@ npm run android:apk:local
 最终产物位于：
 
 ```text
-artifacts/android/newsnook-<version>-cloud-release.apk
-artifacts/android/newsnook-<version>-local-release.apk
+artifacts/android/newsnook-<version>-cloud-arm64-v8a-release.apk
+artifacts/android/newsnook-<version>-cloud-armeabi-v7a-release.apk
+artifacts/android/newsnook-<version>-cloud-x86_64-release.apk
+artifacts/android/newsnook-<version>-local-arm64-v8a-release.apk
 artifacts/android/newsnook-<version>-cloud-release.aab
 artifacts/android/newsnook-<version>-local-release.aab
 ```
 
-只构建其中一种时使用 `npm run android:apk:cloud`、`npm run android:apk:local`、`npm run android:aab:cloud` 或 `npm run android:aab:local`。两个变体使用相同包名和签名，面向同一应用渠道，不能在同一设备上并存。
+只构建其中一种变体时使用 `npm run android:apk:cloud`、`npm run android:apk:local`、`npm run android:aab:cloud` 或 `npm run android:aab:local`。需要指定单个 APK 架构时运行 `node scripts/android-build.mjs apk <cloud|local> <arm64-v8a|armeabi-v7a|x86_64>`；local 仅接受 `arm64-v8a`。两个变体使用相同包名和签名，面向同一应用渠道，不能在同一设备上并存。
 
 版本号只改一处：`package.json` 的 `"version"`（semver，如 `1.1.0`）。
 
-- 产物文件名：`newsnook-<version>-<cloud|local>-release.apk|aab`
+- APK 产物文件名：`newsnook-<version>-<cloud|local>-<abi>-release.apk`；AAB 仍为 `newsnook-<version>-<cloud|local>-release.aab`
 - 包内 `versionName`：同一字符串
 - 包内 `versionCode`：由 `X.Y.Z` 推导为 `X*10000 + Y*100 + Z`（例如 `1.2.3` → `10203`）
 

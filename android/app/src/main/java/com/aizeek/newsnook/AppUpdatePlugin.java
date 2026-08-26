@@ -29,6 +29,21 @@ public class AppUpdatePlugin extends Plugin {
     private String activeFileName = null;
     private BroadcastReceiver downloadReceiver = null;
 
+    /** 返回应用内更新选择 APK 时使用的首个受支持 ABI。 */
+    @PluginMethod
+    public void getDeviceAbi(PluginCall call) {
+        String abi = "arm64-v8a";
+        for (String supported : Build.SUPPORTED_ABIS) {
+            if ("arm64-v8a".equals(supported) || "armeabi-v7a".equals(supported) || "x86_64".equals(supported)) {
+                abi = supported;
+                break;
+            }
+        }
+        JSObject result = new JSObject();
+        result.put("abi", abi);
+        call.resolve(result);
+    }
+
     @PluginMethod
     public void canInstallPackages(PluginCall call) {
         JSObject result = new JSObject();

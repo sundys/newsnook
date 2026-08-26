@@ -9,7 +9,7 @@ import {
   saveAvailableVersion,
   touchLastCheck,
 } from './prefs'
-import type { AppUpdateChannel, LatestReleaseInfo, UpdateCheckResult } from './types'
+import type { AppUpdateAbi, AppUpdateChannel, LatestReleaseInfo, UpdateCheckResult } from './types'
 
 export type AppUpdateUiState = {
   downloading: boolean
@@ -66,6 +66,16 @@ export function getActiveDownloadId(): number | null {
   return activeDownloadId
 }
 
+export async function resolveUpdateAbi(): Promise<AppUpdateAbi> {
+  if (!isAppUpdateSupported()) return 'arm64-v8a'
+  try {
+    const { abi } = await AppUpdateNative.getDeviceAbi()
+    if (abi === 'armeabi-v7a' || abi === 'x86_64' || abi === 'arm64-v8a') return abi
+  } catch {
+    // 旧插件或 ABI 探测失败时优先兼容历史 arm64 Release。
+  }
+  return 'arm64-v8a'
+}
 async function ensureNativeListeners(): Promise<void> {
   if (nativeListenersBound || !isAppUpdateSupported()) return
   nativeListenersBound = true
@@ -89,7 +99,11 @@ export async function checkForUpdate(): Promise<UpdateCheckResult> {
     return { status: 'error', message: '当前平台不支持应用内更新' }
   }
   await ensureNativeListeners()
-  const result = await fetchLatestRelease(__APP_VERSION__, resolveChannel())
+  const result = await fetchLatestRelease(
+    __APP_VERSION__,
+    resolveChannel(),
+    await resolveUpdateAbi(),
+  )
   if (result.status !== 'error') {
     touchLastCheck(Date.now())
     if (result.status === 'available') {
