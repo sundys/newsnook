@@ -3,10 +3,16 @@
  * 运行态仍是 preferences + enabled；本模块负责快照库与互转。
  */
 
-import { CATEGORIES, type CategoryId, type NewsCategory, PORTAL_VISIBLE_CATEGORY_IDS } from './categories'
+import {
+  CATEGORIES,
+  PORTAL_VISIBLE_CATEGORY_IDS,
+  type CategoryId,
+  type NewsCategory,
+} from './categories'
 import {
   describeSources,
   FOLLOWS_ENABLED_SOURCES,
+  isAggregateCategoryId,
   type Preferences,
 } from './preferences'
 import { isCustomSourceId, SOURCES } from './registry'
@@ -101,14 +107,16 @@ export function normalizeSnapshot(raw: unknown): LayoutSnapshot {
 
   const categorySources: Record<CategoryId, string[]> = {}
   Object.entries(input.categorySources ?? {}).forEach(([categoryId, sourceIds]) => {
-    if (!allCategoryIds.has(categoryId) || categoryId === FOLLOWS_ENABLED_SOURCES) return
+    if (!allCategoryIds.has(categoryId) || isAggregateCategoryId(categoryId)) return
     const valid = uniqueValidSourceIds(sourceIds)
     if (valid.length) categorySources[categoryId] = valid
   })
 
+  // 「推荐」已改为动态栏位（不进注册表）：旧快照中的 recommend id 由 uniqueValid 自然剔除
   const hidden = uniqueValid(input.hiddenCategoryIds, allCategoryIds)
+  const categoryOrder = uniqueValid(input.categoryOrder, allCategoryIds)
   return {
-    categoryOrder: uniqueValid(input.categoryOrder, allCategoryIds),
+    categoryOrder,
     hiddenCategoryIds: hidden.length >= allCategoryIds.size ? hidden.slice(1) : hidden,
     categorySources,
     customCategories,
@@ -265,18 +273,19 @@ export const BUILTIN_PRESETS: readonly LayoutPreset[] = [
   })(),
   (() => {
     /**
-     * AI 四层：源头 / 业界 / 深读 / 社区；默认启用压量，避免刷屏。
+     * AI 六栏：OpenAI / Claude / 实验室 / 业界 / 深读 / 社区；默认启用压量，避免刷屏。
      * 其余源（PyTorch、雷锋网、周报、PaperWeekly 等）留在分类里可一键开启。
      */
     const categorySources = {
-      ai: pickKnown(
-        'openai-news',
+      'ai-openai': pickKnown('openai-news', 'openai-cookbook'),
+      'ai-claude': pickKnown(
         'anthropic',
-        'google-ai',
-        'deepmind',
-        'huggingface',
-        'arena',
+        'claude-blog',
+        'claude-customers',
+        'claude-academy-use-cases',
+        'claude-academy-tutorials',
       ),
+      ai: pickKnown('google-ai', 'deepmind', 'huggingface', 'arena'),
       'ai-media': pickKnown('qbitai', 'jiqizhixin', 'aiera', 'mittr-ai'),
       'ai-depth': pickKnown(
         'zhidx',
@@ -309,6 +318,8 @@ export const BUILTIN_PRESETS: readonly LayoutPreset[] = [
       ),
     }
     const visible: CategoryId[] = [
+      'ai-openai',
+      'ai-claude',
       'ai',
       'ai-media',
       'ai-depth',
@@ -320,7 +331,7 @@ export const BUILTIN_PRESETS: readonly LayoutPreset[] = [
     return builtinPreset(
       BUILTIN_TECH_ID,
       '极客与 AI',
-      '源头 · 业界 · 深读 · 社区 · 科技深度 · 硬核科普',
+      'OpenAI · Claude · 实验室 · 业界 · 深读 · 社区 · 科技深度 · 硬核科普',
       {
         categoryOrder: visible,
         hiddenCategoryIds: hiddenExcept(visible),
@@ -392,15 +403,16 @@ export const BUILTIN_PRESETS: readonly LayoutPreset[] = [
       ),
       intl: pickKnown('bloomberg-opinion', 'project-syndicate', 'scmp-china', 'theinitium'),
       tech: pickKnown('geekpark', 'sspai', 'ifanr'),
-      ai: pickKnown('qbitai', 'aiera', 'venturebeat-ai'),
+      // AI 媒体快报归「业界」栏（ai 栏已改为实验室官方一手）
+      'ai-media': pickKnown('qbitai', 'aiera', 'venturebeat-ai'),
     }
     return builtinPreset(
       BUILTIN_BIZ_ID,
       '商业创投',
       '深度特写 · 创投产业 · 国际经贸 · 科技观察',
       {
-        categoryOrder: ['mix', 'finance', 'intl', 'tech', 'ai'],
-        hiddenCategoryIds: hiddenExcept(['mix', 'finance', 'intl', 'tech', 'ai']),
+        categoryOrder: ['mix', 'finance', 'intl', 'tech', 'ai-media'],
+        hiddenCategoryIds: hiddenExcept(['mix', 'finance', 'intl', 'tech', 'ai-media']),
         categorySources,
         customCategories: [],
         enabledSourceIds: exclusiveEnabledSourceIds(

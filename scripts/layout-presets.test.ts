@@ -125,6 +125,11 @@ console.log('layout-presets core: ok')
 // —— Task 2: builtins ——
 assert.equal(BUILTIN_PRESETS.length, 7)
 
+// 「本地推荐」独立预设已下线：推荐改为每个预设内达标后自动出现的动态栏
+// （契约见 scripts/recommend.test.ts）
+assert.equal(findBuiltinPreset('builtin-foryou'), undefined)
+assert.ok(!BUILTIN_PRESETS.some((preset) => preset.snapshot.categoryOrder.includes('recommend')))
+
 const portal = normalizeSnapshot(findBuiltinPreset('builtin-default')!.snapshot)
 assert.deepEqual(portal.categoryOrder, [
   'mix',
@@ -141,6 +146,8 @@ assert.deepEqual(portal.categoryOrder, [
 assert.ok(!portal.hiddenCategoryIds.includes('ent'))
 assert.ok(!portal.hiddenCategoryIds.includes('sports'))
 assert.ok(portal.hiddenCategoryIds.includes('ai'))
+assert.ok(portal.hiddenCategoryIds.includes('ai-openai'))
+assert.ok(portal.hiddenCategoryIds.includes('ai-claude'))
 assert.ok(portal.hiddenCategoryIds.includes('ai-media'))
 assert.ok(portal.hiddenCategoryIds.includes('ai-depth'))
 assert.ok(portal.hiddenCategoryIds.includes('ai-community'))
@@ -180,12 +187,19 @@ const visible = new Set(
   CATEGORIES.map((c) => c.id).filter((id) => !techSnap.hiddenCategoryIds.includes(id)),
 )
 assert.ok(visible.has('tech') && visible.has('ai') && visible.has('ai-media'))
+assert.ok(visible.has('ai-openai') && visible.has('ai-claude'))
 assert.ok(visible.has('ai-depth') && visible.has('ai-community'))
 assert.ok(!visible.has('fun'))
-// AI 四层：源头 / 业界 / 深读 / 社区
-assert.deepEqual(techSnap.categorySources.ai, [
-  'openai-news',
+// AI 六栏：OpenAI / Claude / 实验室 / 业界 / 深读 / 社区
+assert.deepEqual(techSnap.categorySources['ai-openai'], ['openai-news', 'openai-cookbook'])
+assert.deepEqual(techSnap.categorySources['ai-claude'], [
   'anthropic',
+  'claude-blog',
+  'claude-customers',
+  'claude-academy-use-cases',
+  'claude-academy-tutorials',
+])
+assert.deepEqual(techSnap.categorySources.ai, [
   'google-ai',
   'deepmind',
   'huggingface',
@@ -219,7 +233,17 @@ assert.deepEqual(techSnap.enabledSourceIds, [])
 assert.ok(techSnap.hiddenCategoryIds.includes('mix'))
 assert.deepEqual(
   techSnap.categoryOrder.filter((id) => !techSnap.hiddenCategoryIds.includes(id)),
-  ['ai', 'ai-media', 'ai-depth', 'ai-community', 'tech-depth', 'tech', 'science'],
+  [
+    'ai-openai',
+    'ai-claude',
+    'ai',
+    'ai-media',
+    'ai-depth',
+    'ai-community',
+    'tech-depth',
+    'tech',
+    'science',
+  ],
 )
 
 const depth = normalizeSnapshot(findBuiltinPreset('builtin-depth')!.snapshot)

@@ -2,13 +2,16 @@
  * 阅读分类：覆盖注册表内全部可用信源。
  * - 「综合」读取用户在频道页启用的源
  * - 默认可见为门户经典栏（见 preferences.DEFAULT_HIDDEN_CATEGORY_IDS / presets.PORTAL_VISIBLE_CATEGORY_IDS）
- * - AI 四层（源头 / 业界 / 深读 / 社区）与游戏、科技深度等默认隐藏，由场景预设打开
+ * - AI 六栏（OpenAI / Claude / 实验室 / 业界 / 深读 / 社区）与游戏、科技深度等默认隐藏，由场景预设打开
  * - RSS / 专栏用主题分类承接，保证每个 sourceId 至少落入一个分类
  */
 
 import { SOURCES } from './registry'
 
 export type CategoryId = string
+
+/** 本地推荐分类：候选池为当前预设启用的全部信源，排序见 lib/recommend.ts */
+export const RECOMMEND_CATEGORY_ID: CategoryId = 'recommend'
 
 export interface NewsCategory {
   id: CategoryId
@@ -22,6 +25,22 @@ export interface NewsCategory {
   sourceIds?: string[]
   /** 标记是否为用户自建的自定义分类 */
   isCustom?: boolean
+}
+
+/**
+ * 动态「推荐」分类：不进 CATEGORIES 注册表，不参与分类管理与预设快照；
+ * 由 App 在预设内阅读量达标（lib/recommend.isRecommendationReady）时插到轨道最前。
+ */
+export const RECOMMEND_CATEGORY: NewsCategory = {
+  id: RECOMMEND_CATEGORY_ID,
+  label: '推荐',
+  short: '推荐',
+  caption: '基于本机已读记录对预设内信源做个性化排序 · 数据不出本机',
+}
+
+/** 「推荐」是动态栏位的保留名：自建分类的名称与短名都不得使用 */
+export function isReservedCategoryLabel(label: string): boolean {
+  return label.trim() === RECOMMEND_CATEGORY.label
 }
 
 /** 单源分类：轨道名与来源名一致 */
@@ -101,21 +120,33 @@ export const CATEGORIES: NewsCategory[] = [
       'gnews-science',
     ],
   },
-  // AI 按信息层次拆四栏：源头（官方）→ 业界（媒体）→ 深读（二次加工）→ 社区
+  // AI 按信息层次拆栏：OpenAI / Claude / 实验室（官方一手）→ 业界（媒体）→ 深读（二次加工）→ 社区
+  {
+    id: 'ai-openai',
+    label: 'OpenAI',
+    short: 'OpenAI',
+    caption: 'OpenAI 官方：News 发布 · Cookbook 实践指南',
+    sourceIds: ['openai-news', 'openai-cookbook'],
+  },
+  {
+    id: 'ai-claude',
+    label: 'Claude',
+    short: 'Claude',
+    caption: 'Anthropic 官方：新闻 · Claude 博客 · 客户案例 · 学院用例/教程',
+    sourceIds: [
+      'anthropic',
+      'claude-blog',
+      'claude-customers',
+      'claude-academy-use-cases',
+      'claude-academy-tutorials',
+    ],
+  },
   {
     id: 'ai',
-    label: '源头',
-    short: '源头',
-    caption: '实验室与平台官方：OpenAI · Anthropic · Google · DeepMind · HF · PyTorch · Arena',
-    sourceIds: [
-      'openai-news',
-      'anthropic',
-      'google-ai',
-      'deepmind',
-      'huggingface',
-      'pytorch',
-      'arena',
-    ],
+    label: '实验室',
+    short: '实验室',
+    caption: '实验室与平台官方：Google AI · DeepMind · Hugging Face · PyTorch · Arena',
+    sourceIds: ['google-ai', 'deepmind', 'huggingface', 'pytorch', 'arena'],
   },
   {
     id: 'ai-media',
