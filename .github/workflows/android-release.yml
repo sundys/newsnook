@@ -116,3 +116,28 @@ jobs:
             artifacts/android/newsnook-*-local-arm64-v8a-release.apk
             artifacts/android/newsnook-*-cloud-release.aab
             artifacts/android/newsnook-*-local-release.aab
+
+      # Fork lock: guarantee the per-tag notes body lands on the release page even if
+      # body_path above is ignored (e.g. when updating an existing draft release).
+      - name: Apply release notes body
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}"
+          curl -sf -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
+            "${API}/releases/tags/${GITHUB_REF_NAME}" -o "${RUNNER_TEMP}/release.json"
+          RELEASE_ID="$(jq -r '.id' "${RUNNER_TEMP}/release.json")"
+          CURRENT_BODY="$(jq -r '.body // ""' "${RUNNER_TEMP}/release.json")"
+          FIRST_LINE="$(head -n 1 "${NOTES_FILE}")"
+          if printf '%s' "${CURRENT_BODY}" | grep -qF "${FIRST_LINE}"; then
+            echo "Release body already contains the notes; nothing to do."
+            exit 0
+          fi
+          jq -n --arg notes "$(cat "${NOTES_FILE}")" --arg existing "${CURRENT_BODY}" \
+            '{body: (if $existing == "" then $notes else $notes + "\n\n---\n\n" + $existing end)}' \
+            > "${RUNNER_TEMP}/release-patch.json"
+          curl -sf -X PATCH -H "Authorization: Bearer ${GH_TOKEN}" -H "Accept: application/vnd.github+json" \
+            "${API}/releases/${RELEASE_ID}" -d @"${RUNNER_TEMP}/release-patch.json" > /dev/null
+          echo "Release body updated."
