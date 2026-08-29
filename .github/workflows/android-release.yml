@@ -89,11 +89,22 @@ jobs:
       - name: List artifacts
         run: ls -lh artifacts/android/
 
+      # Fork lock: release notes body is provided per tag at .github/release-notes/<tag>.md.
+      - name: Prepare release notes body
+        run: |
+          NOTES_FILE=".github/release-notes/${GITHUB_REF_NAME}.md"
+          if [ -f "$NOTES_FILE" ]; then
+            cp "$NOTES_FILE" "${RUNNER_TEMP}/release-notes.md"
+          else
+            echo "本次未提供独立更新摘要，请参考下方变更列表。" > "${RUNNER_TEMP}/release-notes.md"
+          fi
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
+          body_path: ${{ runner.temp }}/release-notes.md
           draft: false
           prerelease: false
           generate_release_notes: true
