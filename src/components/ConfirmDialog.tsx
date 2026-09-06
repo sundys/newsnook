@@ -1,6 +1,8 @@
 import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
 import { Check } from 'lucide-react'
 
+import { lockBodyScroll } from '../lib/bodyScrollLock'
+
 /** 弹窗次要操作：描边取消钮 */
 const DIALOG_CANCEL_CLASS =
   'rounded-full border border-haze bg-transparent px-4 py-1.5 font-mono text-[11px] text-paper-muted transition-colors hover:text-paper'
@@ -39,11 +41,10 @@ export function OptionPickerDialog<T extends string>({
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onCancel()
     }
-    const previousOverflow = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
+    const unlock = lockBodyScroll()
     window.addEventListener('keydown', onKey)
     return () => {
-      document.body.style.overflow = previousOverflow
+      unlock()
       window.removeEventListener('keydown', onKey)
     }
   }, [open, onCancel])
@@ -111,6 +112,66 @@ interface ConfirmDialogProps {
   danger?: boolean
   onConfirm: () => void
   onCancel: () => void
+}
+
+interface AlertDialogProps {
+  open: boolean
+  title: string
+  message: ReactNode
+  confirmLabel?: string
+  onClose: () => void
+}
+
+/** 应用内提示弹窗，替代 alert（WebView 原生框不适配 Android 体验） */
+export function AlertDialog({
+  open,
+  title,
+  message,
+  confirmLabel = '知道了',
+  onClose,
+}: AlertDialogProps) {
+  const titleId = useId()
+
+  useEffect(() => {
+    if (!open) return
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') onClose()
+    }
+    const unlock = lockBodyScroll()
+    window.addEventListener('keydown', onKey)
+    return () => {
+      unlock()
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [open, onClose])
+
+  if (!open) return null
+
+  return (
+    <div
+      className="fixed inset-0 z-[60] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+      role="presentation"
+      onClick={onClose}
+    >
+      <div
+        role="alertdialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        className="w-full max-w-sm rounded-2xl border border-haze bg-ink-raised p-5 shadow-2xl"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <h3 id={titleId} className="font-display text-[17px] font-medium text-paper">
+          {title}
+        </h3>
+        <div className="mt-2 text-[12.5px] leading-relaxed text-paper-muted">{message}</div>
+        <div className="mt-5 flex items-center justify-end">
+          <button type="button" onClick={onClose} className={DIALOG_CONFIRM_CLASS}>
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
 }
 
 /** 应用内确认弹窗，替代 window.confirm（WebView 原生框不适配 Android 体验） */

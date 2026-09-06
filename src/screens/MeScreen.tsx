@@ -3,6 +3,7 @@ import {
   ArrowLeft,
   Bookmark,
   ChevronRight,
+  CloudUpload,
   Contrast,
   Database,
   Globe,
@@ -12,6 +13,7 @@ import {
   LayoutGrid,
   LayoutTemplate,
   Rss,
+  ServerCog,
   Search,
   Type,
 } from 'lucide-react'
@@ -30,8 +32,10 @@ interface Props {
   typographySummary: string
   appearanceSummary: string
   translationSummary: string
+  aiSummary: string
   proxySummary: string
   storageSummary: string
+  accountSummary: string
   hasUpdate?: boolean
   availableVersion?: string
   onOpenLater: () => void
@@ -43,8 +47,10 @@ interface Props {
   onOpenTypographySettings: () => void
   onOpenAppearanceSettings: () => void
   onOpenTranslationSettings: () => void
+  onOpenAiSettings: () => void
   onOpenProxySettings: () => void
   onOpenStorageSettings: () => void
+  onOpenAccountSync: () => void
   onOpenAbout: () => void
   /** 从阅读中区进入时：显示返回并回到原文 */
   onBackToReading?: () => void
@@ -98,8 +104,10 @@ export function MeScreen({
   typographySummary,
   appearanceSummary,
   translationSummary,
+  aiSummary,
   proxySummary,
   storageSummary,
+  accountSummary,
   hasUpdate,
   availableVersion,
   onOpenLater,
@@ -111,8 +119,10 @@ export function MeScreen({
   onOpenTypographySettings,
   onOpenAppearanceSettings,
   onOpenTranslationSettings,
+  onOpenAiSettings,
   onOpenProxySettings,
   onOpenStorageSettings,
+  onOpenAccountSync,
   onOpenAbout,
   onBackToReading,
 }: Props) {
@@ -232,6 +242,12 @@ export function MeScreen({
             dataTour="me-translation"
           />
           <SettingsRow
+            icon={ServerCog}
+            title="AI"
+            caption={aiSummary}
+            onClick={onOpenAiSettings}
+          />
+          <SettingsRow
             icon={Globe}
             title="网络与代理"
             caption={proxySummary}
@@ -242,6 +258,12 @@ export function MeScreen({
             title="离线存储与备份"
             caption={storageSummary}
             onClick={onOpenStorageSettings}
+          />
+          <SettingsRow
+            icon={CloudUpload}
+            title="账户与同步"
+            caption={accountSummary}
+            onClick={onOpenAccountSync}
           />
         </ul>
 

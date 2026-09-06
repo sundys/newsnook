@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { RefreshCw } from 'lucide-react'
 
 import { describeInlineVideo, type InlineVideoDescriptor } from '../lib/inlineVideos'
+import { watchInlineVideoFullscreenHost } from '../lib/inlineVideoFullscreenHost'
 import type { MediaResourceDescriptor } from '../features/mediaSniffer/types'
 import { InkVideoPlayer, type InkVideoPlayerFullscreenHandle } from './InkVideoPlayer'
 
@@ -17,10 +18,14 @@ interface Props {
   onRefreshSource?: () => void
   /** 播放器全屏句柄：让阅读器返回键在全屏时先退出全屏 */
   fullscreenHandleRef?: MutableRefObject<InkVideoPlayerFullscreenHandle | null>
+  /** 阅读器浮层打开时隐藏嗅探 FAB */
+  suppressResourceFab?: boolean
 }
 
 interface MountedInlineVideo extends InlineVideoDescriptor {
   host: HTMLDivElement
+  anchor: Comment
+  stopFullscreenWatch: () => void
   original: HTMLVideoElement
 }
 
@@ -40,6 +45,7 @@ export function InlineArticleVideos({
   onUnlocked,
   onRefreshSource,
   fullscreenHandleRef,
+  suppressResourceFab = false,
 }: Props) {
   const [mounted, setMounted] = useState<MountedInlineVideo[]>([])
 
@@ -63,24 +69,43 @@ export function InlineArticleVideos({
       // available; otherwise the sanitized attribute parsed above is reliable.
       const src = video.currentSrc?.trim() || descriptor.src
       const host = document.createElement('div')
+      const anchor = document.createComment('reader-inline-video-anchor')
       host.className = 'reader-inline-video'
       host.setAttribute('data-reader-inline-video', String(index + 1))
-      video.replaceWith(host)
-      next.push({ ...descriptor, src, host, original: video })
+      video.replaceWith(anchor, host)
+      const stopFullscreenWatch = watchInlineVideoFullscreenHost(host, anchor)
+      next.push({ ...descriptor, src, host, anchor, stopFullscreenWatch, original: video })
     })
 
     setMounted(next)
 
     return () => {
-      // Restore the original element when the HTML itself has not already been
-      // replaced. This also keeps React Strict Mode's effect replay safe.
-      next.forEach(({ host, original }) => {
-        if (host.isConnected) host.replaceWith(original)
+      // Native/fallback fullscreen temporarily promotes the portal host to <body>
+      // so reader containment cannot clip a fixed player. Put it back before
+      // restoring the original article DOM; this also keeps Strict Mode replay safe.
+      next.forEach(({ host, anchor, stopFullscreenWatch, original }) => {
+        stopFullscreenWatch()
+        const parent = anchor.parentNode
+        if (!parent) {
+          host.remove()
+          return
+        }
+        if (host.parentNode !== parent || host.previousSibling !== anchor) {
+          parent.insertBefore(host, anchor.nextSibling)
+        }
+        host.replaceWith(original)
+        anchor.remove()
       })
     }
   }, [enabled, fallbackTitle, html, rootRef, sourcePage])
 
-  return mounted.map(({ host, original: _original, ...video }, index) =>
+  return mounted.map(({
+    host,
+    anchor: _anchor,
+    stopFullscreenWatch: _stopFullscreenWatch,
+    original: _original,
+    ...video
+  }, index) =>
     createPortal(
       video.pending && !video.src ? (
         <VideoSniffPlaceholder
@@ -102,6 +127,7 @@ export function InlineArticleVideos({
           deferLoad={deferLoad}
           onUnlocked={() => onUnlocked?.(video.src)}
           fullscreenHandleRef={fullscreenHandleRef}
+          suppressResourceFab={suppressResourceFab}
         />
       ),
       host,

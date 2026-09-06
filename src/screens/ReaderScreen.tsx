@@ -1,11 +1,13 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type RefObject } from 'react'
 import { Browser } from '@capacitor/browser'
 import { Capacitor } from '@capacitor/core'
-import { ArrowLeft, BookmarkCheck, BookmarkPlus, Globe, Languages, LoaderCircle, MessageSquare, MoreHorizontal, RefreshCw, X } from 'lucide-react'
+import { ArrowLeft, BookmarkCheck, BookmarkPlus, Globe, Languages, LoaderCircle, MessageSquare, MoreHorizontal, RefreshCw, ScrollText, X } from 'lucide-react'
 
+import { AiSpeedReadPanel, type SpeedReadUiState } from '../components/AiSpeedReadPanel'
 import { ImageLightbox } from '../components/ImageLightbox'
 import { EinkReaderMenu } from '../components/EinkReaderMenu'
 import { ReaderMoreMenu } from '../components/ReaderMoreMenu'
+import { ReaderScrollIndicator } from '../components/ReaderScrollIndicator'
 import { ShareArticleSheet } from '../components/ShareArticleSheet'
 import { InkAudioPlayer } from '../components/InkAudioPlayer'
 import { InkImage } from '../components/InkImage'
@@ -32,6 +34,7 @@ import { deferMediaInHtml, DEFERRED_SRC_ATTR, type DeferredHostPhase } from '../
 import { stageYoutubeEmbedsInHtml } from '../lib/youtubeEmbeds'
 import { shouldAutoLoadMedia } from '../lib/mediaLoadPolicy'
 import { revealReader } from '../lib/motion'
+import { SCROLL_SURFACE_ATTR } from '../lib/gestureStyles'
 import {
   flushReadingPositions,
   forgetReadingPosition,
@@ -40,6 +43,7 @@ import {
   resolveScrollTop,
 } from '../lib/readingPosition'
 import { buildClipboardText, copyShareText, shareArticle } from '../lib/shareArticle'
+import { buildArticleMarkdown, exportMarkdownFile, markdownFileName } from '../lib/articleMarkdown'
 import {
   SHARE_FALLBACK_TITLE,
   buildShareUrl,
@@ -54,6 +58,7 @@ import { articleCoverUrl } from '../lib/articleAudio'
 import { articleRelativeTime } from '../lib/time'
 import type { Article } from '../lib/types'
 import type { TypographyPrefs } from '../sources/preferences'
+import { resolveAiFeatureConfig } from '../features/translation/aiConfig'
 import { createTranslationService } from '../features/translation/service'
 import {
   translationDisplayModeLabel,
@@ -61,6 +66,9 @@ import {
   translationProviderLabel,
 } from '../features/translation/config'
 import type { TranslatedArticleContent, TranslationPrefs } from '../features/translation/types'
+import { loadSpeedReadCache, saveSpeedReadCache, speedReadCacheKey } from '../features/speedRead/cache'
+import { createSpeedReadPartialStore, type SpeedReadPartialStore } from '../features/speedRead/partialStore'
+import { parseSpeedReadStored, summarizeArticle, hasSpeedReadableText } from '../features/speedRead/service'
 import { fetchCommentCount, supportsComments } from '../features/comments/service'
 import { CommentsDrawer } from '../features/comments/components/CommentsDrawer'
 import { articleFromRelatedLink } from '../features/catalogEngine/toArticles'
@@ -91,7 +99,6 @@ interface Props {
 }
 
 type LoadState = 'loading' | 'ready' | 'error'
-const TRANSLATION_TIMEOUT_MS = 60_000
 
 export function ReaderScreen({
   article,
@@ -143,9 +150,20 @@ export function ReaderScreen({
   const [translationState, setTranslationState] = useState<'idle' | 'loading' | 'error'>('idle')
   const [translationError, setTranslationError] = useState('')
   const translationAbortRef = useRef<AbortController | null>(null)
-  const translationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pendingPartialRef = useRef<TranslatedArticleContent | null>(null)
   const partialFrameRef = useRef(0)
+  const [speedReadOpen, setSpeedReadOpen] = useState(false)
+  const [speedReadState, setSpeedReadState] = useState<SpeedReadUiState>('idle')
+  const [speedReadMarkdown, setSpeedReadMarkdown] = useState('')
+  const [speedReadError, setSpeedReadError] = useState('')
+  const [exportingMarkdown, setExportingMarkdown] = useState(false)
+  const speedReadAbortRef = useRef<AbortController | null>(null)
+  const speedReadPartialStoreRef = useRef<SpeedReadPartialStore | null>(null)
+  if (!speedReadPartialStoreRef.current) {
+    speedReadPartialStoreRef.current = createSpeedReadPartialStore()
+  }
+  const speedReadPartialStore = speedReadPartialStoreRef.current
+
   const canComment = useMemo(
     () => supportsComments({ ...article, originUrl: resolvedOriginUrl || article.originUrl }),
     [article, resolvedOriginUrl],
@@ -188,6 +206,13 @@ export function ReaderScreen({
   useEffect(
     () => () => {
       if (toastTimerRef.current) clearTimeout(toastTimerRef.current)
+    },
+    [],
+  )
+
+  useEffect(
+    () => () => {
+      speedReadAbortRef.current?.abort()
     },
     [],
   )
@@ -379,6 +404,10 @@ export function ReaderScreen({
     let isTracking = false
 
     const onTouchStart = (e: TouchEvent) => {
+      const target = e.target
+      if (target instanceof Element && target.closest('[data-reader-scroll-indicator]')) {
+        return
+      }
       if (e.touches.length !== 1) return
       const touch = e.touches[0]
       if (window.innerWidth - touch.clientX <= 38) {
@@ -497,8 +526,6 @@ export function ReaderScreen({
   useEffect(() => {
     translationAbortRef.current?.abort()
     translationAbortRef.current = null
-    if (translationTimeoutRef.current) clearTimeout(translationTimeoutRef.current)
-    translationTimeoutRef.current = null
     setTranslated(null)
     setShowTranslation(false)
     setTranslationState('idle')
@@ -514,7 +541,6 @@ export function ReaderScreen({
   useEffect(
     () => () => {
       translationAbortRef.current?.abort()
-      if (translationTimeoutRef.current) clearTimeout(translationTimeoutRef.current)
     },
     [],
   )
@@ -693,16 +719,123 @@ export function ReaderScreen({
       ? SHARE_FALLBACK_TITLE
       : article.title
 
+  const canonicalTitle = resolvedTitle || pendingTitle
   const displayedTitle =
     showTranslation && translated && !comparing
       ? translated.title
-      : resolvedTitle || pendingTitle
+      : canonicalTitle
 
   /** 分享深链进来的文章标题只是占位；收藏与再分享都用正文抽取补回的真标题 */
   const laterArticle = useMemo(
     () => withResolvedShareTitle(article, resolvedTitle),
     [article, resolvedTitle],
   )
+
+  // 同一份偏好复用一个实例：AI 翻译部分失败后「重试」只补失败段，不重发已成功段
+  const translationService = useMemo(
+    () => createTranslationService(translationPrefs),
+    [translationPrefs],
+  )
+
+  const speedReadConfig = useMemo(
+    () => resolveAiFeatureConfig({ ai: translationPrefs.ai }, 'speedRead'),
+    [translationPrefs.ai],
+  )
+  const speedReadKey = useMemo(
+    () => speedReadCacheKey(article.id, canonicalTitle, html, speedReadConfig),
+    [article.id, canonicalTitle, html, speedReadConfig],
+  )
+
+  useEffect(() => {
+    speedReadAbortRef.current?.abort()
+    speedReadAbortRef.current = null
+    speedReadPartialStore.reset()
+    setSpeedReadOpen(false)
+    setSpeedReadError('')
+
+    if (loadState !== 'ready' || !html.trim()) {
+      setSpeedReadMarkdown('')
+      setSpeedReadState('idle')
+      return
+    }
+
+    const cached = loadSpeedReadCache(speedReadKey)
+    if (cached) {
+      const parsed = parseSpeedReadStored(cached)
+      speedReadPartialStore.set({ thinking: parsed.thinking, body: parsed.body, status: '' })
+      setSpeedReadMarkdown(parsed.body)
+      setSpeedReadState('ready')
+      return
+    }
+
+    speedReadPartialStore.reset()
+    setSpeedReadMarkdown('')
+    setSpeedReadState('idle')
+  }, [html, loadState, speedReadKey, speedReadPartialStore])
+
+  const runSpeedRead = useCallback(async () => {
+    if (loadState !== 'ready' || !html.trim()) return
+
+    speedReadAbortRef.current?.abort()
+
+    const controller = new AbortController()
+    speedReadAbortRef.current = controller
+    speedReadPartialStore.reset()
+    setSpeedReadOpen(true)
+    setSpeedReadState('loading')
+    setSpeedReadError('')
+    setSpeedReadMarkdown('')
+
+    try {
+      const result = await summarizeArticle({
+        title: canonicalTitle,
+        contentHtml: html,
+        config: speedReadConfig,
+        signal: controller.signal,
+        onPartial: (partial) => {
+          if (controller.signal.aborted || speedReadAbortRef.current !== controller) return
+          speedReadPartialStore.set(partial)
+        },
+      })
+      if (controller.signal.aborted || speedReadAbortRef.current !== controller) return
+      const parsed = parseSpeedReadStored(result)
+      speedReadPartialStore.set({ thinking: parsed.thinking, body: parsed.body, status: '' })
+      setSpeedReadMarkdown(parsed.body)
+      setSpeedReadState('ready')
+      saveSpeedReadCache(speedReadKey, result)
+    } catch (error) {
+      if (speedReadAbortRef.current !== controller) return
+      if (controller.signal.aborted) {
+        const latest = speedReadPartialStore.getSnapshot()
+        speedReadPartialStore.set({ ...latest, status: '' })
+        setSpeedReadState('cancelled')
+        return
+      }
+      speedReadPartialStore.reset()
+      setSpeedReadMarkdown('')
+      setSpeedReadError(error instanceof Error ? error.message : 'AI 速读生成失败')
+      setSpeedReadState('error')
+    } finally {
+      if (speedReadAbortRef.current === controller) speedReadAbortRef.current = null
+    }
+  }, [canonicalTitle, html, loadState, speedReadConfig, speedReadKey, speedReadPartialStore])
+
+  const openSpeedRead = useCallback(() => {
+    setSpeedReadOpen(true)
+    if (speedReadState === 'ready' && speedReadMarkdown.trim()) return
+    if (speedReadState === 'loading') return
+    void runSpeedRead()
+  }, [runSpeedRead, speedReadMarkdown, speedReadState])
+
+  const closeSpeedRead = useCallback(() => {
+    setSpeedReadOpen(false)
+  }, [])
+
+  const cancelSpeedRead = useCallback(() => {
+    if (!speedReadAbortRef.current) return
+    speedReadAbortRef.current.abort()
+    setSpeedReadState('cancelled')
+  }, [])
 
   const paged = usePagedReader({
     enabled: einkMode,
@@ -914,6 +1047,12 @@ export function ReaderScreen({
 
   const isBlockedBody = bodySource === 'blocked'
 
+  const canSpeedRead =
+    loadState === 'ready' &&
+    Boolean(html.trim()) &&
+    bodySource !== 'blocked' &&
+    (bodySource !== 'video' || hasSpeedReadableText(html))
+
   /** 出版社地址：只用于「浏览器核对原文」与分享 token 里的正文来源 */
   const originUrl = resolvedOriginUrl || article.originUrl
 
@@ -997,11 +1136,48 @@ export function ReaderScreen({
     )
   }, [shareClipboardText, shareUrl, showToast])
 
+  const handleExportMarkdown = useCallback(async () => {
+    setMoreMenuOpen(false)
+    if (loadState !== 'ready' || !html.trim()) {
+      showToast('正文加载完成后才能导出')
+      return
+    }
+
+    setExportingMarkdown(true)
+    try {
+      const markdown = buildArticleMarkdown({
+        article,
+        title: canonicalTitle,
+        html,
+        originUrl,
+        speedReadMarkdown: speedReadState === 'ready' ? speedReadMarkdown : undefined,
+      })
+      const result = await exportMarkdownFile(
+        markdown,
+        markdownFileName(canonicalTitle),
+        canonicalTitle,
+      )
+      if (result === 'downloaded') showToast('Markdown 已下载')
+      else if (result === 'shared') showToast('Markdown 已导出')
+    } catch {
+      showToast('Markdown 导出失败，请重试')
+    } finally {
+      setExportingMarkdown(false)
+    }
+  }, [
+    article,
+    canonicalTitle,
+    html,
+    loadState,
+    originUrl,
+    showToast,
+    speedReadMarkdown,
+    speedReadState,
+  ])
+
   const cancelTranslation = useCallback(() => {
     translationAbortRef.current?.abort()
     translationAbortRef.current = null
-    if (translationTimeoutRef.current) clearTimeout(translationTimeoutRef.current)
-    translationTimeoutRef.current = null
     if (partialFrameRef.current) {
       window.cancelAnimationFrame(partialFrameRef.current)
       partialFrameRef.current = 0
@@ -1043,14 +1219,7 @@ export function ReaderScreen({
     setTranslationError('')
     setShowTranslation(true)
     setTranslated({ title: article.title, html })
-
-    translationTimeoutRef.current = setTimeout(() => {
-      if (translationAbortRef.current !== controller) return
-      controller.abort()
-      setTranslated(null)
-      setTranslationError('翻译等待超过 60 秒，请检查网络或翻译服务后重试。')
-      setTranslationState('error')
-    }, TRANSLATION_TIMEOUT_MS)
+    let latestPartial: TranslatedArticleContent | null = null
     try {
       const flushPartial = () => {
         partialFrameRef.current = 0
@@ -1058,7 +1227,7 @@ export function ReaderScreen({
         if (!pending || controller.signal.aborted) return
         setTranslated(pending)
       }
-      const result = await createTranslationService(translationPrefs).translateArticle(
+      const result = await translationService.translateArticle(
         article.title,
         html,
         translationPrefs,
@@ -1066,6 +1235,7 @@ export function ReaderScreen({
           signal: controller.signal,
           onPartial: (partial) => {
             if (controller.signal.aborted) return
+            latestPartial = partial
             // 每帧最多落地一次整篇 HTML，避免 batch 回调把主线程打满
             pendingPartialRef.current = partial
             if (partialFrameRef.current) return
@@ -1084,8 +1254,14 @@ export function ReaderScreen({
       setTranslationState('idle')
     } catch (error) {
       if (controller.signal.aborted) return
-      // 未完成的部分译文不保留：否则错误清除后会被当成完整译文直接展示
-      setTranslated(null)
+      // 长文中个别段落最终失败时，保留本轮已经成功的译文；失败段仍保持原文。
+      if (latestPartial) {
+        setTranslated(latestPartial)
+        setShowTranslation(true)
+      } else {
+        setTranslated(null)
+        setShowTranslation(false)
+      }
       const raw = error instanceof Error ? error.message : '翻译失败'
       setTranslationError(
         raw.includes('MODEL_NOT_DOWNLOADED')
@@ -1096,8 +1272,6 @@ export function ReaderScreen({
     } finally {
       if (translationAbortRef.current === controller) {
         translationAbortRef.current = null
-        if (translationTimeoutRef.current) clearTimeout(translationTimeoutRef.current)
-        translationTimeoutRef.current = null
       }
       if (partialFrameRef.current) {
         window.cancelAnimationFrame(partialFrameRef.current)
@@ -1169,6 +1343,32 @@ export function ReaderScreen({
                         : '翻译'}
                 </span>
               </button>
+              {canSpeedRead && (
+                <button
+                  type="button"
+                  onClick={openSpeedRead}
+                  aria-expanded={speedReadOpen}
+                  aria-label={speedReadState === 'loading' ? '速读生成中' : speedReadOpen ? '查看速读' : '打开速读'}
+                  className="flex h-9 items-center gap-1 px-1 transition-colors duration-200"
+                >
+                  {speedReadState === 'loading' ? (
+                    <LoaderCircle size={14} strokeWidth={1.7} className="animate-spin text-cinnabar-soft" />
+                  ) : (
+                    <ScrollText
+                      size={14}
+                      strokeWidth={1.7}
+                      className={speedReadOpen ? 'text-cinnabar' : 'text-paper-muted'}
+                    />
+                  )}
+                  <span
+                    className={`font-mono text-[10px] tracking-[0.08em] ${
+                      speedReadOpen || speedReadState === 'loading' ? 'text-cinnabar-soft' : 'text-paper-muted'
+                    }`}
+                  >
+                    {speedReadState === 'loading' ? '速读中' : '速读'}
+                  </span>
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => onToggleLater(laterArticle)}
@@ -1215,17 +1415,19 @@ export function ReaderScreen({
           </div>
         </header>
 
-        <div
-          ref={rootRef}
-          onScroll={einkMode ? undefined : handleScroll}
-          className={`scroll-hidden min-h-0 flex-1 overflow-x-hidden ${
-            einkMode
-              ? paged.pageSliceHeight > paged.pageHeight
-                ? 'overflow-y-auto'
-                : 'overflow-hidden'
-              : 'overflow-y-auto'
-          }`}
-        >
+        <div className="relative min-h-0 flex-1">
+          <div
+            ref={rootRef}
+            {...{ [SCROLL_SURFACE_ATTR]: '' }}
+            onScroll={einkMode ? undefined : handleScroll}
+            className={`scroll-hidden h-full overflow-x-hidden ${
+              einkMode
+                ? paged.pageSliceHeight > paged.pageHeight
+                  ? 'overflow-y-auto'
+                  : 'overflow-hidden'
+                : 'overflow-y-auto'
+            }`}
+          >
           <div
             className="mx-auto w-full max-w-3xl lg:max-w-4xl"
             style={
@@ -1287,6 +1489,8 @@ export function ReaderScreen({
                 <p className="mt-2 font-mono text-[9.5px] tracking-[0.1em] text-cinnabar-soft">
                   {translationState === 'loading'
                     ? `${translationProviderLabel(translationPrefs.provider)} 正在翻译正文…`
+                    : translationState === 'error'
+                      ? `${translationProviderLabel(translationPrefs.provider)} · 已保留本轮成功译文`
                     : `${translationProviderLabel(translationPrefs.provider)} · ${translationDisplayModeLabel(translationPrefs.displayMode)} · 已译为${translationLanguageLabel(translationPrefs.targetLanguage)}`}
                 </p>
               )}
@@ -1313,11 +1517,14 @@ export function ReaderScreen({
                         className="inline-flex items-center gap-1 rounded-lg border border-cinnabar/50 bg-cinnabar/15 px-2.5 py-1 font-mono text-[11px] font-medium text-cinnabar-soft hover:bg-cinnabar/25 active:scale-95 transition-all"
                       >
                         <RefreshCw size={11} strokeWidth={2} />
-                        重新翻译
+                        重试翻译
                       </button>
                       <button
                         type="button"
                         onClick={() => {
+                          // 保留的只是半篇译文：回原文后清掉，下次点「翻译」重新走一遍
+                          //（已成功段由 Provider 缓存秒回），不能被当成完整译文直接展示。
+                          setTranslated(null)
                           setShowTranslation(false)
                           setTranslationError('')
                           setTranslationState('idle')
@@ -1363,6 +1570,7 @@ export function ReaderScreen({
                 poster={article.image}
                 openOriginal={() => void openOriginal()}
                 closeHandleRef={originPlayerCloseRef}
+                suppressResourceFab={speedReadOpen}
               />
             )}
 
@@ -1379,6 +1587,7 @@ export function ReaderScreen({
                   poster={article.image}
                   title={article.title}
                   sourcePage={resolvedOriginUrl || article.originUrl}
+                  suppressResourceFab={speedReadOpen}
                   onRefreshSource={() => setRetryToken((value) => value + 1)}
                   deferLoad={!autoLoadMedia}
                   onUnlocked={() => {
@@ -1465,6 +1674,7 @@ export function ReaderScreen({
                     deferLoad={!autoLoadMedia}
                     onUnlocked={onUnlockedMedia}
                     fullscreenHandleRef={videoFullscreenRef}
+                    suppressResourceFab={speedReadOpen}
                   />
                   <InlineArticleAudio
                     rootRef={proseRef}
@@ -1484,6 +1694,7 @@ export function ReaderScreen({
                     unlockedUrls={unlockedSet}
                     onUnlocked={onUnlockedMedia}
                     fullscreenHandleRef={videoFullscreenRef}
+                    suppressResourceFab={speedReadOpen}
                   />
                 </>
               )}
@@ -1534,7 +1745,10 @@ export function ReaderScreen({
             </div>
             </div>
           </div>
+          </div>
+          {!einkMode && <ReaderScrollIndicator targetRef={rootRef} />}
         </div>
+
 
       {einkMode && loadState === 'ready' && !einkMenuOpen && (
         <div
@@ -1574,9 +1788,12 @@ export function ReaderScreen({
       <ReaderMoreMenu
         open={moreMenuOpen}
         hasOriginUrl={Boolean(originUrl)}
+        canExportMarkdown={loadState === 'ready' && Boolean(html.trim())}
+        exportingMarkdown={exportingMarkdown}
         onClose={() => setMoreMenuOpen(false)}
         onShare={openShareSheet}
         onCopyLink={() => void handleCopyLink()}
+        onExportMarkdown={() => void handleExportMarkdown()}
         onOpenOriginal={() => {
           setMoreMenuOpen(false)
           void openOriginal()
@@ -1641,7 +1858,7 @@ export function ReaderScreen({
       )}
 
       {/* 底部右下角悬浮跟贴胶囊（随时一触即达） */}
-      {canComment && !commentsOpen && !shareSheetOpen && !einkMode && (
+      {canComment && !commentsOpen && !shareSheetOpen && !einkMode && !speedReadOpen && (
         <div
           className={`fixed right-4 z-40 transition-all duration-300 pointer-events-auto safe-bottom-20 ${
             (einkMode ? chromeVisible : pillVisible)
@@ -1684,6 +1901,21 @@ export function ReaderScreen({
         open={commentsOpen}
         onClose={() => setCommentsOpen(false)}
         article={commentsArticle}
+      />
+
+      <AiSpeedReadPanel
+        open={speedReadOpen}
+        state={speedReadState}
+        partialStore={speedReadPartialStore}
+        error={speedReadError}
+        model={speedReadConfig.model}
+        articleTitle={canonicalTitle}
+        sourceName={article.sourceName}
+        sourceLabel={article.sourceLabel}
+        originUrl={originUrl}
+        onClose={closeSpeedRead}
+        onRetry={() => void runSpeedRead()}
+        onCancel={cancelSpeedRead}
       />
     </div>
   )

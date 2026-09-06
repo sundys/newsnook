@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import {
   Check,
   ChevronDown,
+  ChevronRight,
   Cloud,
   CloudCog,
   Download,
@@ -47,6 +48,7 @@ interface Props {
   prefs: TranslationPrefs
   onChange: (prefs: TranslationPrefs) => void
   onBack: () => void
+  onOpenAiSettings?: () => void
 }
 
 type AsyncState = 'idle' | 'working' | 'success' | 'error'
@@ -69,6 +71,7 @@ function Field({
   min,
   max,
   onChange,
+  onBlur,
   suffix,
 }: {
   label: string
@@ -78,6 +81,7 @@ function Field({
   min?: number
   max?: number
   onChange: (value: string) => void
+  onBlur?: () => void
   suffix?: ReactNode
 }) {
   return (
@@ -97,6 +101,7 @@ function Field({
           autoCapitalize="none"
           autoCorrect="off"
           onChange={(event) => onChange(event.target.value)}
+          onBlur={onBlur}
           className="min-w-0 flex-1 bg-transparent py-3 text-[13px] text-paper outline-none placeholder:text-paper-faint/65"
         />
         {suffix}
@@ -105,7 +110,50 @@ function Field({
   )
 }
 
-export function TranslationScreen({ prefs, onChange, onBack }: Props) {
+function ConcurrencyField({
+  value,
+  max,
+  onCommit,
+}: {
+  value: number
+  max: number
+  onCommit: (value: number) => void
+}) {
+  const [draft, setDraft] = useState(() => String(value))
+
+  useEffect(() => {
+    setDraft(String(value))
+  }, [value])
+
+  const commitIfValid = (raw: string) => {
+    const trimmed = raw.trim()
+    if (!trimmed) return false
+    const parsed = Number(trimmed)
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > max) return false
+    onCommit(parsed)
+    return true
+  }
+
+  return (
+    <Field
+      label="最大并发"
+      type="number"
+      min={1}
+      max={max}
+      value={draft}
+      placeholder="2"
+      onChange={(raw) => {
+        setDraft(raw)
+        void commitIfValid(raw)
+      }}
+      onBlur={() => {
+        if (!commitIfValid(draft)) setDraft(String(value))
+      }}
+    />
+  )
+}
+
+export function TranslationScreen({ prefs, onChange, onBack, onOpenAiSettings }: Props) {
   const localTranslationAvailable = isLocalTranslationAvailable()
   const bergamotAvailable = isBergamotTranslationAvailable()
   const [modelState, setModelState] = useState<MlKitModelState | null>(null)
@@ -168,9 +216,10 @@ export function TranslationScreen({ prefs, onChange, onBack }: Props) {
     }
   }, [prefs.provider, bergamotAvailable, source, target])
 
-  const activeCloud = isLocalTranslationProviderId(prefs.provider)
-    ? null
-    : prefs.cloud[prefs.provider]
+  const activeCloud =
+    isLocalTranslationProviderId(prefs.provider) || prefs.provider === 'openai'
+      ? null
+      : prefs.cloud[prefs.provider]
   const providerName = translationProviderLabel(prefs.provider)
   const availableProviders = TRANSLATION_PROVIDERS.filter(
     (provider) =>
@@ -631,25 +680,10 @@ export function TranslationScreen({ prefs, onChange, onBack }: Props) {
               }
             />
             {prefs.provider === 'deeplx' && (
-              <Field
-                label="最大并发"
-                type="number"
-                min={1}
+              <ConcurrencyField
+                value={activeCloud.concurrency ?? 2}
                 max={5}
-                value={String(activeCloud.concurrency ?? 2)}
-                placeholder="2"
-                onChange={(raw) => {
-                  const trimmed = raw.trim()
-                  if (!trimmed) {
-                    updateCloud({ concurrency: 2 })
-                    return
-                  }
-                  const n = Number(trimmed)
-                  if (!Number.isFinite(n)) return
-                  const truncated = Math.trunc(n)
-                  if (truncated < 1 || truncated > 5) return
-                  updateCloud({ concurrency: truncated })
-                }}
+                onCommit={(concurrency) => updateCloud({ concurrency })}
               />
             )}
             {prefs.provider === 'azure' && (
@@ -668,25 +702,10 @@ export function TranslationScreen({ prefs, onChange, onBack }: Props) {
                   placeholder="例如 gpt-4o-mini"
                   onChange={(model) => updateCloud({ model })}
                 />
-                <Field
-                  label="最大并发"
-                  type="number"
-                  min={1}
+                <ConcurrencyField
+                  value={activeCloud.concurrency ?? 2}
                   max={10}
-                  value={String(activeCloud.concurrency ?? 2)}
-                  placeholder="2"
-                  onChange={(raw) => {
-                    const trimmed = raw.trim()
-                    if (!trimmed) {
-                      updateCloud({ concurrency: 2 })
-                      return
-                    }
-                    const n = Number(trimmed)
-                    if (!Number.isFinite(n)) return
-                    const truncated = Math.trunc(n)
-                    if (truncated < 1 || truncated > 10) return
-                    updateCloud({ concurrency: truncated })
-                  }}
+                  onCommit={(concurrency) => updateCloud({ concurrency })}
                 />
                 <button
                   type="button"
@@ -731,6 +750,27 @@ export function TranslationScreen({ prefs, onChange, onBack }: Props) {
             {testMessage && <p className={`text-[11px] leading-relaxed ${testState === 'error' ? 'text-cinnabar-soft' : 'text-paper-faint'}`}>{testMessage}</p>}
           </div>
         </div>
+      ) : null}
+
+      {prefs.provider === 'openai' && onOpenAiSettings ? (
+        <SettingsSection title="AI 配置">
+          <div className="border-y border-haze bg-ink">
+            <button
+              type="button"
+              onClick={onOpenAiSettings}
+              className="page-x flex w-full items-center gap-3 py-4 text-left transition-colors hover:bg-ink-raised/30"
+            >
+              <CloudCog size={17} strokeWidth={1.6} className="shrink-0 text-paper-muted" />
+              <span className="min-w-0 flex-1">
+                <span className="block text-[14px] text-paper">管理 AI 提供商与模型</span>
+                <span className="mt-0.5 block font-mono text-[10px] text-paper-faint">
+                  接口、密钥、翻译与速读的模型在「我的 → AI」中配置
+                </span>
+              </span>
+              <ChevronRight size={14} strokeWidth={1.5} className="shrink-0 text-paper-faint" />
+            </button>
+          </div>
+        </SettingsSection>
       ) : null}
 
       <OptionPickerDialog

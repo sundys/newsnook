@@ -13,6 +13,20 @@ export const LIST_CACHE_PREFIX = 'cache:v3:'
 const LOCAL_CACHE_PREFIXES = [LIST_CACHE_PREFIX, 'body:']
 
 /**
+ * 云同步的本地状态。都要进冷启动镜像：Android 上如果 shadow/outbox 没被还原，
+ * 重启后会把已经同步过的配置当成新改动重推一遍。
+ * 这些结构里只有指纹与游标，不含 Session、也不含 Secret 明文。
+ */
+export const SYNC_STATE_KEY = 'sync-state:v1'
+export const SYNC_JOURNAL_KEY = 'sync-journal:v1'
+/** 与 sync-state 分开存，避免同步域重置时向云端登记成新设备 */
+export const DEVICE_ID_KEY = 'device-id'
+export const SYNC_ONBOARDING_KEY = 'sync-onboarding-seen'
+export const SCHEME_ONBOARDING_KEY = 'scheme-onboarding-seen'
+/** 首次同步基线选择前的本机快照，只落 localStorage（见 lib/backup.ts） */
+export const SYNC_SAFETY_SNAPSHOT_KEY = 'sync-safety-snapshot:v1'
+
+/**
  * 冷启动只镜像这些键。列表/正文缓存已是 localOnly，其余键延后清理即可。
  * 全量 Preferences.keys() + 逐 key get 会明显拖慢 Android 复启。
  */
@@ -26,6 +40,11 @@ const BOOTSTRAP_MIRROR_KEYS = [
   'later',
   'read',
   'appUpdate',
+  SYNC_STATE_KEY,
+  SYNC_JOURNAL_KEY,
+  DEVICE_ID_KEY,
+  SYNC_ONBOARDING_KEY,
+  SCHEME_ONBOARDING_KEY,
 ] as const
 
 /** 阅读位置：条目多但每条很小，只落 localStorage，避免每次滚动都写原生 Preferences */
@@ -249,6 +268,73 @@ export function loadPresetsState(): unknown {
 
 export function savePresetsState(state: unknown): void {
   write('presets', state)
+}
+
+export function loadSyncState(): unknown {
+  return read<unknown>(SYNC_STATE_KEY, null)
+}
+
+export function saveSyncState(state: unknown): void {
+  write(SYNC_STATE_KEY, state)
+}
+
+export function loadPersistedDeviceId(): string | null {
+  const value = read<string | null>(DEVICE_ID_KEY, null)
+  return typeof value === 'string' && value ? value : null
+}
+
+export function savePersistedDeviceId(deviceId: string): void {
+  write(DEVICE_ID_KEY, deviceId)
+}
+
+export function clearSyncState(): void {
+  removeKeys([SYNC_STATE_KEY, SYNC_JOURNAL_KEY])
+}
+
+export function loadSyncJournal(): unknown {
+  return read<unknown>(SYNC_JOURNAL_KEY, null)
+}
+
+export function saveSyncJournal(journal: unknown): void {
+  write(SYNC_JOURNAL_KEY, journal)
+}
+
+export function clearSyncJournal(): void {
+  removeKeys([SYNC_JOURNAL_KEY])
+}
+
+/**
+ * 首次同步前的本机安全快照：只存一份（新的覆盖旧的），只落 localStorage。
+ * 它是「云端基线选错了想反悔」的兜底，不参与冷启动镜像，也不进普通备份文件。
+ */
+export function loadSyncSafetySnapshot(): unknown {
+  return read<unknown>(SYNC_SAFETY_SNAPSHOT_KEY, null)
+}
+
+export function saveSyncSafetySnapshot(snapshot: unknown): void {
+  write(SYNC_SAFETY_SNAPSHOT_KEY, snapshot, { localOnly: true })
+}
+
+export function clearSyncSafetySnapshot(): void {
+  removeKeys([SYNC_SAFETY_SNAPSHOT_KEY])
+}
+
+/** 同步引导只提示一次；「稍后再说」与「去登录」都算已看过 */
+export function hasSeenSyncOnboarding(): boolean {
+  return read<boolean>(SYNC_ONBOARDING_KEY, false)
+}
+
+export function markSyncOnboardingSeen(): void {
+  write(SYNC_ONBOARDING_KEY, true)
+}
+
+/** 风格选择引导只出现一次；确认与「稍后再说」都算已看过。升级到本版的用户没有此标记，因此都会看到。 */
+export function hasSeenSchemeOnboarding(): boolean {
+  return read<boolean>(SCHEME_ONBOARDING_KEY, false)
+}
+
+export function markSchemeOnboardingSeen(): void {
+  write(SCHEME_ONBOARDING_KEY, true)
 }
 
 export function loadReadingPositions(): unknown {

@@ -2,6 +2,11 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { applyNativeChrome } from '../lib/nativeChrome'
 import {
+  persistRuntimeSecrets,
+  sanitizeForPersistence,
+  withRuntimeSecrets,
+} from '../features/account/secretStore'
+import {
   isBergamotTranslationAvailable,
   isLocalTranslationAvailable,
 } from '../features/translation/native'
@@ -41,6 +46,12 @@ export interface PreferencesApi {
   /** 「跟随系统」解析后的实际明暗，供界面展示当前状态 */
   resolvedTheme: ResolvedTheme
   update: (updater: (prev: Preferences) => Preferences) => void
+  /**
+   * 云同步专用入口：整包替换偏好。
+   * 与 `update` 的区别只在语义——调用方是同步引擎而不是用户操作，
+   * 设备本地设置已在 `features/sync/runtimeAdapter` 里保住，这里照常走归一化与持久化。
+   */
+  replaceFromSync: (next: Preferences) => void
 }
 
 function resolveFallbackProvider(prefs: Preferences): Preferences['translation']['provider'] {
@@ -60,7 +71,8 @@ function resolveFallbackProvider(prefs: Preferences): Preferences['translation']
 
 export function usePreferences(): PreferencesApi {
   const [prefs, setPrefs] = useState<Preferences>(() => {
-    const normalized = normalizePreferences(loadPreferences())
+    // 原生上 Secret 明文来自 Keystore（BootstrapRoot 已在挂载前回填），普通存储里是空串
+    const normalized = withRuntimeSecrets(normalizePreferences(loadPreferences()))
     const provider = normalized.translation.provider
     if (!isLocalTranslationProviderId(provider)) {
       return normalized
@@ -82,7 +94,9 @@ export function usePreferences(): PreferencesApi {
   const schemeApplied = useRef(false)
 
   useEffect(() => {
-    savePreferences(prefs)
+    // 运行时 prefs 仍带明文，翻译/代理调用方不变；落盘的那份在原生上被净化
+    savePreferences(sanitizeForPersistence(prefs))
+    void persistRuntimeSecrets(prefs)
     applyTypography(prefs)
     setRuntimeProxyPrefs(prefs.proxy)
     setRuntimeWifiOnlyAutoLoadMedia(Boolean(prefs.wifiOnlyAutoLoadMedia))
@@ -119,5 +133,9 @@ export function usePreferences(): PreferencesApi {
     setPrefs((prev) => updater(prev))
   }, [])
 
-  return { prefs, resolvedTheme, update }
+  const replaceFromSync = useCallback((next: Preferences) => {
+    setPrefs(normalizePreferences(next))
+  }, [])
+
+  return { prefs, resolvedTheme, update, replaceFromSync }
 }

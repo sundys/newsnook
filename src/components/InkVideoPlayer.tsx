@@ -24,6 +24,7 @@ import {
   needsMediaHotlinkBypass,
 } from '../lib/mediaFetch'
 import { setNativeFullScreen } from '../lib/nativeChrome'
+import { recoverAppScrollSurfaces } from '../lib/gestureStyles'
 import { getVideoStatusMessage } from '../lib/videoStatus'
 import {
   createBrightnessControl,
@@ -77,7 +78,11 @@ import {
 } from './inkVideoPlayer/playback'
 import { CastOverlay } from './inkVideoPlayer/CastOverlay'
 import { GestureHudOverlay } from './inkVideoPlayer/GestureHudOverlay'
-import { MediaResourceOverlay } from './inkVideoPlayer/MediaResourceOverlay'
+import {
+  MediaResourceOverlay,
+  MediaResourcePageProvider,
+  MediaResourceScreen,
+} from './inkVideoPlayer/MediaResourceOverlay'
 import { PlayerBatteryIcon } from './inkVideoPlayer/PlayerBatteryIcon'
 import { useCastControls } from './inkVideoPlayer/useCastControls'
 
@@ -96,6 +101,15 @@ interface Props {
   onPlaybackError?: () => void
   /** 宿主页面（阅读器）读取该句柄，让系统返回键在全屏时先退出全屏而不是关文章 */
   fullscreenHandleRef?: MutableRefObject<InkVideoPlayerFullscreenHandle | null>
+  /** 为 false 时仅内嵌切换资源，不打开独立媒体页（媒体页内嵌播放器用） */
+  mediaPageHost?: boolean
+  /** 阅读器浮层（如 AI 速读）打开时隐藏嗅探 FAB */
+  suppressResourceFab?: boolean
+}
+
+type MediaResourcePageState = {
+  active: MediaResourceDescriptor
+  resources: MediaResourceDescriptor[]
 }
 
 /** 宿主页面可读取的全屏句柄：immersive 表示当前是否全屏，exit 请求退出全屏。 */
@@ -114,9 +128,60 @@ export interface InkVideoPlayerFullscreenHandle {
  *   双击专职播放 / 暂停；上半屏与内嵌一致。
  * - 通用：双指缩放与双指拖动画面；放大后单指手势仍可调进度 / 亮度 / 音量；顶部按钮旋转 / 还原画面。
  */
-export function InkVideoPlayer({ src, poster, title, format, sourcePage, requestHeaders, extraUrls, resources, deferLoad, onUnlocked, onRefreshSource, onPlaybackError, fullscreenHandleRef }: Props) {
+export function InkVideoPlayer({
+  src,
+  poster,
+  title,
+  format,
+  sourcePage,
+  requestHeaders,
+  extraUrls,
+  resources,
+  deferLoad,
+  onUnlocked,
+  onRefreshSource,
+  onPlaybackError,
+  fullscreenHandleRef,
+  mediaPageHost = true,
+  suppressResourceFab = false,
+}: Props) {
   const [allowed, setAllowed] = useState(!deferLoad)
   const [selectedResource, setSelectedResource] = useState<MediaResourceDescriptor | null>(null)
+  const [mediaPage, setMediaPage] = useState<MediaResourcePageState | null>(null)
+  const mediaPageRef = useRef(mediaPage)
+  mediaPageRef.current = mediaPage
+  const innerFullscreenRef = useRef<InkVideoPlayerFullscreenHandle | null>(null)
+
+  const openMediaResourcePage = useCallback((
+    resource: MediaResourceDescriptor,
+    resourceList: MediaResourceDescriptor[],
+  ) => {
+    setMediaPage({ active: resource, resources: resourceList })
+  }, [])
+
+  const syncHostFullscreenHandle = useCallback(() => {
+    if (!fullscreenHandleRef || !mediaPageHost) return
+    const inner = innerFullscreenRef.current
+    fullscreenHandleRef.current = {
+      immersive: !!mediaPageRef.current || (inner?.immersive ?? false),
+      exit: () => {
+        if (mediaPageRef.current) {
+          setMediaPage(null)
+          return
+        }
+        inner?.exit()
+      },
+    }
+  }, [fullscreenHandleRef, mediaPageHost])
+
+  const onInnerFullscreenChange = useCallback(() => {
+    syncHostFullscreenHandle()
+  }, [syncHostFullscreenHandle])
+
+  useEffect(() => {
+    syncHostFullscreenHandle()
+  }, [syncHostFullscreenHandle, mediaPage])
+
   const resourceOptions = useMemo<MediaResourceDescriptor[]>(() => {
     if (resources?.length) return resources
     return [{
@@ -137,6 +202,7 @@ export function InkVideoPlayer({ src, poster, title, format, sourcePage, request
 
   useEffect(() => {
     setSelectedResource(null)
+    setMediaPage(null)
   }, [src, resources])
 
   useEffect(() => {
@@ -173,26 +239,100 @@ export function InkVideoPlayer({ src, poster, title, format, sourcePage, request
     ...(active?.relatedUrls ?? []),
     ...(extraUrls ?? []),
   ]))
-  return <InkVideoPlayerReady
-    key={`${active?.id || active?.type || format || 'media'}:${active?.url || src}`}
-    src={active?.url || src}
-    poster={poster}
-    title={title}
-    format={active?.type || format}
-    sourcePage={active?.pageUrl || sourcePage}
-    requestHeaders={active?.requestHeaders || requestHeaders}
-    extraUrls={activeExtraUrls.length ? activeExtraUrls : undefined}
-    resources={resourceOptions}
-    onSelectResource={setSelectedResource}
-    onRefreshSource={onRefreshSource}
-    onPlaybackError={onPlaybackError}
-    fullscreenHandleRef={fullscreenHandleRef}
-  />
+  const playerKey = `${active?.id || active?.type || format || 'media'}:${active?.url || src}`
+  const player = (
+    <InkVideoPlayerReady
+      key={playerKey}
+      src={active?.url || src}
+      poster={poster}
+      title={title}
+      format={active?.type || format}
+      sourcePage={active?.pageUrl || sourcePage}
+      requestHeaders={active?.requestHeaders || requestHeaders}
+      extraUrls={activeExtraUrls.length ? activeExtraUrls : undefined}
+      resources={resourceOptions}
+      onSelectResource={setSelectedResource}
+      onRefreshSource={onRefreshSource}
+      onPlaybackError={onPlaybackError}
+      fullscreenHandleRef={mediaPageHost ? innerFullscreenRef : fullscreenHandleRef}
+      onFullscreenChange={mediaPageHost ? onInnerFullscreenChange : undefined}
+      suppressResourceFab={suppressResourceFab}
+    />
+  )
+
+  if (!mediaPageHost) return player
+
+  const mediaPageExtraUrls = mediaPage
+    ? Array.from(new Set([
+        ...(mediaPage.active.relatedUrls ?? []),
+        ...(extraUrls ?? []),
+      ]))
+    : undefined
+
+  return (
+    <>
+      <MediaResourcePageProvider open={openMediaResourcePage}>
+        {mediaPage ? (
+          <div className="aspect-video w-full bg-[#0c0d10]" aria-hidden data-reader-block />
+        ) : (
+          player
+        )}
+      </MediaResourcePageProvider>
+      {mediaPage && typeof document !== 'undefined' && createPortal(
+        <MediaResourceScreen
+          title={title}
+          resources={mediaPage.resources}
+          activeResource={mediaPage.active}
+          onClose={() => setMediaPage(null)}
+          onSelect={(resource) => {
+            setMediaPage((current) => current ? { ...current, active: resource } : current)
+          }}
+        >
+          <InkVideoPlayer
+            mediaPageHost={false}
+            key={`${mediaPage.active.id || mediaPage.active.type}:${mediaPage.active.url}`}
+            src={mediaPage.active.url}
+            poster={poster}
+            title={title}
+            format={mediaPage.active.type}
+            sourcePage={mediaPage.active.pageUrl || sourcePage}
+            requestHeaders={mediaPage.active.requestHeaders || requestHeaders}
+            extraUrls={mediaPageExtraUrls}
+            resources={mediaPage.resources}
+            onRefreshSource={onRefreshSource}
+            onPlaybackError={onPlaybackError}
+            fullscreenHandleRef={innerFullscreenRef}
+            suppressResourceFab={suppressResourceFab}
+          />
+        </MediaResourceScreen>,
+        document.body,
+      )}
+    </>
+  )
 }
 
-function InkVideoPlayerReady({ src, poster, title, format, sourcePage, requestHeaders, extraUrls, resources, onSelectResource, onRefreshSource, onPlaybackError, fullscreenHandleRef }: Props & { onSelectResource?: (resource: MediaResourceDescriptor) => void }) {
+function InkVideoPlayerReady({
+  src,
+  poster,
+  title,
+  format,
+  sourcePage,
+  requestHeaders,
+  extraUrls,
+  resources,
+  onSelectResource,
+  onRefreshSource,
+  onPlaybackError,
+  fullscreenHandleRef,
+  onFullscreenChange,
+  suppressResourceFab = false,
+}: Props & {
+  onSelectResource?: (resource: MediaResourceDescriptor) => void
+  onFullscreenChange?: () => void
+}) {
   const rootRef = useRef<HTMLDivElement>(null)
   const stageRef = useRef<HTMLDivElement>(null)
+  const gestureSurfaceRef = useRef<HTMLDivElement>(null)
   const videoRef = useRef<HTMLVideoElement>(null)
   const hlsRef = useRef<Hls | null>(null)
   const dashRef = useRef<{ reset: () => void } | null>(null)
@@ -751,14 +891,32 @@ function InkVideoPlayerReady({ src, poster, title, format, sourcePage, requestHe
 
   useEffect(() => {
     if (!immersive) return
+    const root = rootRef.current
     // Entry/exit are awaited in toggleFullscreen so the Activity transition is
     // ordered. This cleanup only covers unmount/source replacement while fullscreen.
     return () => {
-      if (!Capacitor.isNativePlatform()) return
-      void setVideoFullscreen(false).then((applied) => {
-        if (!applied) void setNativeFullScreen(false)
-      })
+      void (async () => {
+        if (Capacitor.isNativePlatform()) {
+          const applied = await setVideoFullscreen(false)
+          if (!applied) await setNativeFullScreen(false)
+        } else {
+          if (root && document.fullscreenElement === root) {
+            try {
+              await document.exitFullscreen()
+            } catch {
+              // Keep current browser fullscreen state if exit is rejected.
+            }
+          }
+          await setNativeFullScreen(false)
+        }
+        recoverAppScrollSurfaces()
+      })()
     }
+  }, [immersive])
+
+  useEffect(() => {
+    if (immersive) return
+    recoverAppScrollSurfaces()
   }, [immersive])
 
   /** 进入全屏时对齐当前系统档位，退出时把亮度还给系统。 */
@@ -798,12 +956,19 @@ function InkVideoPlayerReady({ src, poster, title, format, sourcePage, requestHe
       if (longPressTimerRef.current != null) window.clearTimeout(longPressTimerRef.current)
       if (hudTimerRef.current != null) window.clearTimeout(hudTimerRef.current)
       if (toastTimerRef.current != null) window.clearTimeout(toastTimerRef.current)
+      const surface = gestureSurfaceRef.current
+      if (surface) {
+        activePointersRef.current.forEach((_, pointerId) => {
+          if (surface.hasPointerCapture(pointerId)) surface.releasePointerCapture(pointerId)
+        })
+      }
       activePointersRef.current.clear()
       pinchRef.current = null
       // 卸载时若仍在全屏，窗口亮度必须归还系统，否则整个应用会一直停在调暗状态
       brightnessControl.release()
       volumeControl.release()
       void releasePlayerScreenOrientation()
+      recoverAppScrollSurfaces()
     },
     [brightnessControl, releasePlayerScreenOrientation, volumeControl],
   )
@@ -1038,10 +1203,12 @@ function InkVideoPlayerReady({ src, poster, title, format, sourcePage, requestHe
       },
     }
     fullscreenHandleRef.current = handle
+    onFullscreenChange?.()
     return () => {
       if (fullscreenHandleRef.current === handle) fullscreenHandleRef.current = null
+      onFullscreenChange?.()
     }
-  }, [fullscreenHandleRef, immersive])
+  }, [fullscreenHandleRef, immersive, onFullscreenChange])
 
   const pointerPair = () => {
     const pointers = Array.from(activePointersRef.current.values())
@@ -1244,6 +1411,9 @@ function InkVideoPlayerReady({ src, poster, title, format, sourcePage, requestHe
   }
 
   const onGesturePointerUp = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
     const { point } = pointerLocation(event)
     activePointersRef.current.delete(event.pointerId)
     clearGestureTimers()
@@ -1315,7 +1485,10 @@ function InkVideoPlayerReady({ src, poster, title, format, sourcePage, requestHe
     }, DOUBLE_TAP_MS)
   }
 
-  const onGesturePointerCancel = () => {
+  const onGesturePointerCancel = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId)
+    }
     activePointersRef.current.clear()
     pinchRef.current = null
     multiTouchRef.current = false
@@ -1392,6 +1565,7 @@ function InkVideoPlayerReady({ src, poster, title, format, sourcePage, requestHe
 
         {ready && !fatal && (
           <div
+            ref={gestureSurfaceRef}
             data-video-gesture-surface=""
             className="absolute inset-0 z-[1] touch-none select-none"
             onPointerDown={onGesturePointerDown}
@@ -1715,6 +1889,7 @@ function InkVideoPlayerReady({ src, poster, title, format, sourcePage, requestHe
         resources={resourceOptions}
         open={resourceMenuOpen}
         immersive={immersive}
+        suppressFab={suppressResourceFab}
         onToggle={() => {
           setResourceMenuOpen((open) => !open)
           revealControls()

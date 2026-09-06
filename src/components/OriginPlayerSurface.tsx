@@ -9,7 +9,7 @@ import {
 } from '../features/mediaSniffer/native'
 import { reduceLiveObservations } from '../features/mediaSniffer/liveCandidate'
 import type { MediaDescriptor, MediaObservation } from '../features/mediaSniffer/types'
-import { InkVideoPlayer } from './InkVideoPlayer'
+import { InkVideoPlayer, type InkVideoPlayerFullscreenHandle } from './InkVideoPlayer'
 
 type Mode = 'origin' | 'custom'
 
@@ -28,6 +28,8 @@ interface Props {
   poster?: string
   openOriginal?: () => void
   closeHandleRef?: MutableRefObject<OriginPlayerCloseHandle | null>
+  /** 阅读器浮层打开时隐藏嗅探 FAB */
+  suppressResourceFab?: boolean
 }
 
 /** Reader scrolls an overflow div; window capture alone can miss those events on WebView. */
@@ -88,6 +90,7 @@ export function OriginPlayerSurface({
   poster,
   openOriginal,
   closeHandleRef,
+  suppressResourceFab = false,
 }: Props) {
   const [mode, setMode] = useState<Mode>('origin')
   const [candidate, setCandidate] = useState<MediaDescriptor | null>(null)
@@ -96,11 +99,17 @@ export function OriginPlayerSurface({
   const slotRef = useRef<HTMLDivElement | null>(null)
   const lastBoundsKeyRef = useRef('')
   const sessionReadyRef = useRef(false)
+  const playerFullscreenRef = useRef<InkVideoPlayerFullscreenHandle | null>(null)
 
   useEffect(() => {
     if (!closeHandleRef) return
     closeHandleRef.current = {
       closeCustom: () => {
+        const fullscreen = playerFullscreenRef.current
+        if (fullscreen?.immersive) {
+          fullscreen.exit()
+          return true
+        }
         if (mode !== 'custom') return false
         setMode('origin')
         void setNativeLiveSessionVisible(true)
@@ -246,6 +255,8 @@ export function OriginPlayerSurface({
               resources={candidate.resources}
               onRefreshSource={backToOrigin}
               onPlaybackError={backToOrigin}
+              fullscreenHandleRef={playerFullscreenRef}
+              suppressResourceFab={suppressResourceFab}
             />
           ) : null}
         </div>

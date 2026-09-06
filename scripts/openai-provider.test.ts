@@ -31,7 +31,8 @@ const saved = normalizeTranslationPrefs({
   },
 })
 assert.equal(saved.provider, 'openai')
-assert.equal(saved.cloud.openai.apiKey, 'sk-test')
+assert.equal(saved.cloud.openai.apiKey, '')
+assert.equal(saved.ai.providers[0].apiKey, 'sk-test')
 assert.equal(saved.cloud.openai.endpoint, 'https://gateway.example/v1/')
 assert.equal(saved.cloud.openai.model, 'gpt-4o-mini')
 
@@ -292,13 +293,29 @@ await assert.rejects(
   /Model/,
 )
 
-globalThis.fetch = async () =>
-  Response.json({ error: { message: 'quota exceeded' } }, { status: 429 })
+let retryableCalls = 0
+globalThis.fetch = async () => {
+  retryableCalls += 1
+  return Response.json({ error: { message: 'quota exceeded' } }, { status: 429 })
+}
 await assert.rejects(
   () =>
     provider.translate({ texts: ['x'], sourceLanguage: 'en', targetLanguage: 'zh-Hans' }),
   /AI 翻译：quota exceeded/,
 )
+assert.equal(retryableCalls, 2, '429 should retry the failed segment once')
+
+let nonRetryableCalls = 0
+globalThis.fetch = async () => {
+  nonRetryableCalls += 1
+  return Response.json({ error: { message: 'invalid api key' } }, { status: 401 })
+}
+await assert.rejects(
+  () =>
+    provider.translate({ texts: ['x'], sourceLanguage: 'en', targetLanguage: 'zh-Hans' }),
+  /AI 翻译：invalid api key/,
+)
+assert.equal(nonRetryableCalls, 1, 'non-retryable 4xx should fail immediately')
 
 let active = 0
 let maxActive = 0
@@ -334,6 +351,84 @@ const providerFive = new OpenAiProvider({
 await providerFive.translate({ texts: many, sourceLanguage: 'en', targetLanguage: 'zh-Hans' })
 assert.ok(maxActive <= 5, `custom max concurrent ${maxActive}`)
 assert.ok(maxActive >= 2, `expected some parallelism, got ${maxActive}`)
+
+// 单段最终失败时不能 fail-fast：其它 worker 继续完成，成功段仍逐条 onBatch。
+const bestEffortCalls = new Map<string, number>()
+const bestEffortCompleted: number[] = []
+globalThis.fetch = async (_input, init) => {
+  const body = JSON.parse(String(init?.body)) as {
+    messages: { role: string; content: string }[]
+  }
+  const user = body.messages.find((message) => message.role === 'user')?.content ?? ''
+  const plain = user.match(/^原文：\n([\s\S]+)$/)
+  const text = plain?.[1] ?? user
+  bestEffortCalls.set(text, (bestEffortCalls.get(text) ?? 0) + 1)
+  if (text === 'Fail') {
+    return Response.json({ error: { message: 'bad paragraph' } }, { status: 400 })
+  }
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  return Response.json({ choices: [{ message: { content: `AI:${text}` } }] })
+}
+await assert.rejects(
+  () =>
+    providerFive.translate({
+      texts: ['One', 'Fail', 'Three'],
+      sourceLanguage: 'en',
+      targetLanguage: 'zh-Hans',
+      onBatch: (_batch, startIndex) => bestEffortCompleted.push(startIndex),
+    }),
+  /已完成 2\/3 段，1 段失败；已完成内容已保留/,
+)
+assert.deepEqual(
+  bestEffortCompleted.sort((a, b) => a - b),
+  [0, 2],
+)
+assert.equal(bestEffortCalls.get('Fail'), 1)
+assert.equal(bestEffortCalls.get('One'), 1)
+assert.equal(bestEffortCalls.get('Three'), 1)
+
+// 同一 Provider 实例重试时只补失败段：已成功段直接复用，不再重发整篇。
+globalThis.fetch = async (_input, init) => {
+  const body = JSON.parse(String(init?.body)) as {
+    messages: { role: string; content: string }[]
+  }
+  const user = body.messages.find((message) => message.role === 'user')?.content ?? ''
+  const plain = user.match(/^原文：\n([\s\S]+)$/)
+  const text = plain?.[1] ?? user
+  bestEffortCalls.set(text, (bestEffortCalls.get(text) ?? 0) + 1)
+  await new Promise((resolve) => setTimeout(resolve, 5))
+  return Response.json({ choices: [{ message: { content: `AI:${text}` } }] })
+}
+const resumedIndexes: number[] = []
+const resumed = await providerFive.translate({
+  texts: ['One', 'Fail', 'Three'],
+  sourceLanguage: 'en',
+  targetLanguage: 'zh-Hans',
+  onBatch: (_batch, startIndex) => resumedIndexes.push(startIndex),
+})
+assert.deepEqual(resumed, ['AI:One', 'AI:Fail', 'AI:Three'])
+assert.deepEqual(
+  resumedIndexes.sort((a, b) => a - b),
+  [0, 1, 2],
+  'resumed run must still report every segment through onBatch',
+)
+assert.equal(bestEffortCalls.get('Fail'), 2, 'only the failed segment is re-requested')
+assert.equal(bestEffortCalls.get('One'), 1, 'completed segments are reused on retry')
+assert.equal(bestEffortCalls.get('Three'), 1, 'completed segments are reused on retry')
+
+// 语向不同不能复用：同一文本换目标语言必须重新请求
+await providerFive.translate({ texts: ['One'], sourceLanguage: 'en', targetLanguage: 'ja' })
+assert.equal(bestEffortCalls.get('One'), 2, 'different target language must not hit the cache')
+
+// 新实例不共享缓存：设置页「测试 AI 翻译」每次都真实发请求
+const freshProvider = new OpenAiProvider({
+  apiKey: 'sk-test',
+  endpoint: 'https://api.openai.com/v1',
+  model: 'gpt-4o-mini',
+  concurrency: 5,
+})
+await freshProvider.translate({ texts: ['Three'], sourceLanguage: 'en', targetLanguage: 'zh-Hans' })
+assert.equal(bestEffortCalls.get('Three'), 2, 'a new provider instance starts with an empty cache')
 
 // 同一次调用内重复文本只请求一次，结果按原顺序展开，onBatch 仍逐条回调
 let dedupCalls = 0
