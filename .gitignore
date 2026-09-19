@@ -48,3 +48,7 @@ cloud/.env.*
 !cloud/.env.example
 
 .coding-tools/
+
+evidence
+
+.chappie/

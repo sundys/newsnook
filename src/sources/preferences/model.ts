@@ -16,6 +16,7 @@ import { DEFAULT_PROXY_PREFS } from '../../features/proxy/config'
 import type { ProxyPrefs } from '../../features/proxy/types'
 import {
   CATEGORIES,
+  FAVORITES_CATEGORY_ID,
   PORTAL_CATEGORY_SOURCES,
   PORTAL_VISIBLE_CATEGORY_IDS,
   RECOMMEND_CATEGORY_ID,
@@ -25,6 +26,9 @@ import {
 import type { NewsSource } from '../registry'
 
 export type FontFamilyId = 'sans' | 'serif' | 'system'
+
+/** 首页信息流版式：经典单栏保持旧版阅读节奏，cards 为新版双栏编辑卡片。 */
+export type HomeFeedLayout = 'classic' | 'cards'
 
 export interface TypographyPrefs {
   /** 正文字号倍率，基准 15.5px */
@@ -42,6 +46,11 @@ export const PRESTORE_PER_SOURCE_OPTIONS = [5, 10, 20, 50, 100] as const
 export interface PrestorePrefs {
   enabled: boolean
   perSourceLimit: number
+}
+
+export interface CategoryNameOverride {
+  label: string
+  short: string
 }
 
 export const DEFAULT_PRESTORE_PREFS: PrestorePrefs = {
@@ -69,6 +78,10 @@ export interface Preferences {
   hiddenCategoryIds: CategoryId[]
   /** 分类 → 自定义信源；缺省表示沿用注册表默认 */
   categorySources: Record<CategoryId, string[]>
+  /** 内置分类在当前预设内的显示名称覆盖；分类 id 与信源契约保持不变 */
+  categoryNames: Record<CategoryId, CategoryNameOverride>
+  /** 当前场景预设收藏的信源；由动态「收藏」分类统一展示 */
+  favoriteSourceIds: string[]
   /** 用户自建的自定义分类列表 */
   customCategories?: NewsCategory[]
   /** 用户自建或导入的自定义订阅源 */
@@ -79,6 +92,8 @@ export interface Preferences {
   scheme: ThemeScheme
   /** 自定义配色（scheme === 'custom' 时生效）：昼/夜各一组底色与强调色 */
   customScheme?: CustomSchemePrefs
+  /** 首页信息流版式。新安装默认 cards；历史偏好缺字段时迁移为 classic。 */
+  homeFeedLayout: HomeFeedLayout
   translation: TranslationPrefs
   proxy: ProxyPrefs
   /** 切换/滑动到分类页时是否自动刷新（关闭时保留滚动阅读位置） */
@@ -123,11 +138,14 @@ export const DEFAULT_PREFERENCES: Preferences = {
   categoryOrder: [...PORTAL_VISIBLE_CATEGORY_IDS],
   hiddenCategoryIds: [...DEFAULT_HIDDEN_CATEGORY_IDS],
   categorySources: { ...PORTAL_CATEGORY_SOURCES },
+  categoryNames: {},
+  favoriteSourceIds: [],
   customCategories: [],
   customSources: [],
   typography: DEFAULT_TYPOGRAPHY,
   theme: DEFAULT_THEME_MODE,
   scheme: DEFAULT_THEME_SCHEME,
+  homeFeedLayout: 'cards',
   translation: DEFAULT_TRANSLATION_PREFS,
   proxy: DEFAULT_PROXY_PREFS,
   autoRefreshOnCategorySwitch: true,
@@ -145,7 +163,11 @@ export const FOLLOWS_ENABLED_SOURCES: CategoryId = 'mix'
  * 不接受 categorySources 覆盖，持久化时同样跳过。
  */
 export function isAggregateCategoryId(categoryId: CategoryId): boolean {
-  return categoryId === FOLLOWS_ENABLED_SOURCES || categoryId === RECOMMEND_CATEGORY_ID
+  return (
+    categoryId === FOLLOWS_ENABLED_SOURCES ||
+    categoryId === FAVORITES_CATEGORY_ID ||
+    categoryId === RECOMMEND_CATEGORY_ID
+  )
 }
 
 export const FONT_FAMILY_OPTIONS: { id: FontFamilyId; label: string; cssVar: string }[] = [

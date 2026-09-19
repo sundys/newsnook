@@ -3,6 +3,7 @@ import { BookmarkCheck, Cloud } from 'lucide-react'
 
 import { InkImage } from './InkImage'
 import { articleCoverUrl } from '../lib/articleAudio'
+import { feedDisplayTitle } from '../lib/articleTitle'
 import { cleanSummaryText } from '../lib/cleanSummary'
 import type { Article } from '../lib/types'
 import { articleRelativeTime } from '../lib/time'
@@ -19,8 +20,8 @@ interface RowProps {
   onSourceClick?: (sourceId: string) => void
   /** 邻页预览等场景跳过入场透明，避免横滑露白 */
   revealed?: boolean
-  /** 布局变体：单列横排 (row) / 网格卡片 (card) / 自适应 (auto) */
-  variant?: 'row' | 'card' | 'auto'
+  /** 布局变体：单列横排 (row) / 移动端双栏卡片 (compact-card) / 桌面网格卡片 (card) / 自适应 (auto) */
+  variant?: 'row' | 'compact-card' | 'card' | 'auto'
 }
 
 export const ArticleRow = memo(function ArticleRow({
@@ -37,11 +38,17 @@ export const ArticleRow = memo(function ArticleRow({
 }: RowProps) {
   const [showOriginal, setShowOriginal] = useState(false)
   const showRow = variant === 'row' || variant === 'auto'
+  const showCompactCard = variant === 'compact-card'
   const showCard = variant === 'card' || variant === 'auto'
   const hasTranslation = Boolean(translated?.title)
   const isTranslated = hasTranslation && !showOriginal
-  const activeTitle = isTranslated ? (translated?.title || article.title) : article.title
-  const displaySummary = cleanSummaryText(article.summary, activeTitle)
+  const activeSummary = isTranslated ? (translated?.summary || article.summary) : article.summary
+  const activeTitle = feedDisplayTitle(
+    isTranslated ? (translated?.title || article.title) : article.title,
+    activeSummary,
+  )
+  const originalDisplayTitle = feedDisplayTitle(article.title, article.summary)
+  const displaySummary = cleanSummaryText(activeSummary, activeTitle)
   const cover = articleCoverUrl(article.image)
 
   const renderTranslateBadge = () => {
@@ -70,7 +77,13 @@ export const ArticleRow = memo(function ArticleRow({
     <li
       data-reveal={revealed ? undefined : true}
       className={`article-row-item relative transition-colors duration-300 ${
-        variant === 'card' ? 'h-full bg-transparent' : read ? 'bg-ink/30' : 'bg-ink-raised/60 md:bg-transparent'
+        variant === 'card'
+          ? 'h-full bg-transparent'
+          : variant === 'compact-card'
+            ? 'bg-transparent'
+            : read
+              ? 'bg-ink/30'
+              : 'bg-ink-raised/60 md:bg-transparent'
       }`}
     >
       {/* 移动端横排布局 (Mobile: < md) */}
@@ -78,7 +91,7 @@ export const ArticleRow = memo(function ArticleRow({
         <button
           type="button"
           onClick={() => onOpen(article)}
-          className={`group relative flex w-full items-start gap-3.5 px-4 py-3.5 text-left transition-all duration-200 sm:px-5 sm:py-4 ${
+          className={`group relative flex w-full items-center gap-3.5 px-4 py-3.5 text-left transition-all duration-200 sm:px-5 sm:py-4 ${
             variant === 'auto' ? 'md:hidden' : ''
           } ${
             read
@@ -132,7 +145,7 @@ export const ArticleRow = memo(function ArticleRow({
 
             {/* 文章标题 */}
             <span
-              className={`row-title mt-1.5 block text-[17px] leading-[1.46] tracking-[0.005em] transition-colors ${
+              className={`row-title mt-1.5 line-clamp-2 text-[17px] leading-[1.46] tracking-[0.005em] transition-colors ${
                 read
                   ? 'font-normal text-paper-muted/75'
                   : 'font-medium text-paper group-hover:text-cinnabar'
@@ -143,8 +156,8 @@ export const ArticleRow = memo(function ArticleRow({
 
             {/* 双语对照模式下的外文原标题 */}
             {isTranslated && displayMode === 'compare' && (
-              <span className="mt-0.5 block font-sans text-[12px] leading-snug text-paper-faint/85 line-clamp-1 italic">
-                {article.title}
+              <span className="mt-0.5 font-sans text-[12px] leading-snug text-paper-faint/85 line-clamp-1 italic">
+                {originalDisplayTitle}
               </span>
             )}
 
@@ -162,7 +175,7 @@ export const ArticleRow = memo(function ArticleRow({
 
           {/* 缩略图容器：微圆角与极细边框，强制满幅裁切消除 Letterboxing */}
           {cover && (
-            <span className="relative shrink-0 overflow-hidden rounded-lg border border-haze/70 bg-ink-deep/30 shadow-2xs mt-0.5 h-16 w-16 sm:h-17 sm:w-17">
+            <span className="relative h-16 w-16 shrink-0 overflow-hidden rounded-lg border border-haze/70 bg-ink-deep/30 shadow-2xs sm:h-17 sm:w-17">
               <InkImage
                 src={cover}
                 collapseOnError
@@ -177,6 +190,101 @@ export const ArticleRow = memo(function ArticleRow({
         </button>
       )}
 
+      {/* 移动端双栏杂志卡片：首页主信息流使用；窄屏由外层网格退回单列 */}
+      {showCompactCard && (
+        <button
+          type="button"
+          onClick={() => onOpen(article)}
+          className={`group relative flex w-full flex-col overflow-hidden rounded-[13px] border text-left transition-[transform,background-color,border-color,box-shadow] duration-150 active:scale-[0.985] ${
+            read
+              ? 'border-haze/65 bg-ink-raised/30 active:bg-ink-raised/55'
+              : 'border-haze/85 bg-ink-raised/65 active:border-cinnabar/25 active:bg-ink-raised/90'
+          }`}
+        >
+          {cover && (
+            <span className={`relative block w-full overflow-hidden border-b border-haze/55 bg-ink-deep/30 ${article.contentType === 'video' ? 'aspect-video' : 'aspect-[4/3]'}`}>
+              <InkImage
+                src={cover}
+                collapseOnError
+                className={`h-full w-full object-cover transition-[transform,filter,opacity] duration-300 ${
+                  read
+                    ? 'opacity-[0.76] saturate-[0.72] contrast-[0.96]'
+                    : 'opacity-[0.98] group-active:opacity-90'
+                }`}
+              />
+              {!read && (
+                <span
+                  className="absolute left-2 top-2 h-1.5 w-1.5 rounded-full bg-cinnabar shadow-[0_0_0_2px_rgb(var(--tone-ink-rgb)/0.66)]"
+                  aria-label="未读"
+                />
+              )}
+              {article.contentType === 'video' && (
+                <span className="absolute bottom-2 right-2 rounded-full border border-white/12 bg-black/55 px-1.5 py-0.5 font-mono text-[9px] tracking-[0.08em] text-white/85 backdrop-blur-sm">
+                  视频
+                </span>
+              )}
+            </span>
+          )}
+
+          <span className={`flex min-w-0 flex-1 flex-col ${cover ? 'p-2.5 sm:p-3' : 'p-3 sm:p-3.5'}`}>
+            {!cover && !read && (
+              <span className="mb-2 h-1.5 w-1.5 rounded-full bg-cinnabar" aria-label="未读" />
+            )}
+
+            <span
+              className={`row-title line-clamp-3 text-[15px] leading-[1.42] tracking-[0.005em] transition-colors min-[430px]:text-[15.5px] ${
+                read ? 'font-normal text-paper-muted/78' : 'font-medium text-paper'
+              }`}
+            >
+              {activeTitle}
+            </span>
+
+            {isTranslated && displayMode === 'compare' && (
+              <span className="mt-1 line-clamp-1 font-sans text-[10.5px] leading-snug text-paper-faint/80 italic">
+                {originalDisplayTitle}
+              </span>
+            )}
+
+            {displaySummary && (
+              <span
+                className={`mt-1.5 line-clamp-2 text-[11.5px] leading-[1.55] min-[430px]:text-[12px] ${
+                  read ? 'text-paper-faint/75' : 'text-paper-muted/92'
+                }`}
+              >
+                {displaySummary}
+              </span>
+            )}
+
+            <span className="mt-2.5 flex min-w-0 items-center gap-1 border-t border-haze/45 pt-2 font-mono text-[9.5px] leading-none tracking-[0.04em] text-paper-faint min-[430px]:text-[10px]">
+              <span
+                role={onSourceClick ? 'button' : undefined}
+                tabIndex={onSourceClick ? 0 : undefined}
+                onClick={
+                  onSourceClick
+                    ? (e) => {
+                        e.stopPropagation()
+                        onSourceClick(article.sourceId)
+                      }
+                    : undefined
+                }
+                className={`min-w-0 truncate ${
+                  read ? 'text-paper-faint' : 'text-paper-muted'
+                } ${onSourceClick ? 'transition-colors hover:text-cinnabar' : ''}`}
+              >
+                {article.sourceLabel}
+              </span>
+              <span aria-hidden className="shrink-0 text-paper-faint/45">·</span>
+              <span className="shrink-0">{articleRelativeTime(article)}</span>
+              <span className="ml-auto flex shrink-0 items-center gap-1 text-paper-faint/75">
+                {saved && <BookmarkCheck size={11} strokeWidth={1.65} className="text-cinnabar/85" aria-label="已收藏" />}
+                {prestored && <Cloud size={10.5} strokeWidth={1.35} aria-label="已预存，可离线阅读" />}
+                {renderTranslateBadge()}
+              </span>
+            </span>
+          </span>
+        </button>
+      )}
+
       {/* 桌面端/平板端杂志卡片布局 (Desktop & Tablet: >= md) */}
       {showCard && (
         <button
@@ -186,8 +294,8 @@ export const ArticleRow = memo(function ArticleRow({
             variant === 'auto' ? 'hidden md:flex' : 'flex'
           } ${
             read
-              ? 'border-haze/60 bg-ink/40 hover:border-haze hover:bg-ink-raised/40 opacity-85'
-              : 'border-haze bg-ink-raised/60 hover:border-paper-faint/35 hover:bg-ink-raised hover:shadow-md'
+              ? 'border-haze/60 bg-ink/40 hover:border-haze hover:bg-ink-raised/40'
+              : 'border-haze bg-ink-raised/60 hover:-translate-y-0.5 hover:border-paper-faint/35 hover:bg-ink-raised hover:shadow-md'
           }`}
         >
           <div className="w-full">
@@ -250,7 +358,7 @@ export const ArticleRow = memo(function ArticleRow({
 
             {/* 文章标题 */}
             <h2
-              className={`row-title mt-2 text-[18px] xl:text-[19px] leading-[1.42] tracking-[0.005em] transition-colors duration-200 ${
+              className={`row-title mt-2 line-clamp-3 text-[18px] xl:text-[19px] leading-[1.42] tracking-[0.005em] transition-colors duration-200 ${
                 read
                   ? 'font-normal text-paper-muted/80'
                   : 'font-medium text-paper group-hover:text-cinnabar'
@@ -262,7 +370,7 @@ export const ArticleRow = memo(function ArticleRow({
             {/* 双语对照模式下的外文原标题 */}
             {isTranslated && displayMode === 'compare' && (
               <p className="mt-1 font-sans text-[12px] leading-snug text-paper-faint/85 line-clamp-1 italic">
-                {article.title}
+                {originalDisplayTitle}
               </p>
             )}
 
@@ -302,6 +410,8 @@ interface LeadProps {
   onOpen: (article: Article) => void
   onSourceClick?: (sourceId: string) => void
   revealed?: boolean
+  /** 新版双栏首页使用带边距/圆角的头条卡；经典布局保持原来的全宽头条。 */
+  framed?: boolean
   /** 布局变体：移动端全宽 (lead) / 桌面端横幅 (banner) / 自适应 (auto) */
   variant?: 'lead' | 'banner' | 'auto'
 }
@@ -319,6 +429,7 @@ export const LeadStory = memo(function LeadStory({
   onOpen,
   onSourceClick,
   revealed = false,
+  framed = false,
   variant = 'auto',
 }: LeadProps) {
   const [showOriginal, setShowOriginal] = useState(false)
@@ -326,8 +437,13 @@ export const LeadStory = memo(function LeadStory({
   const showBanner = variant === 'banner' || variant === 'auto'
   const hasTranslation = Boolean(translated?.title)
   const isTranslated = hasTranslation && !showOriginal
-  const activeTitle = isTranslated ? (translated?.title || article.title) : article.title
-  const displaySummary = cleanSummaryText(article.summary, activeTitle)
+  const activeSummary = isTranslated ? (translated?.summary || article.summary) : article.summary
+  const activeTitle = feedDisplayTitle(
+    isTranslated ? (translated?.title || article.title) : article.title,
+    activeSummary,
+  )
+  const originalDisplayTitle = feedDisplayTitle(article.title, article.summary)
+  const displaySummary = cleanSummaryText(activeSummary, activeTitle)
   const cover = articleCoverUrl(article.image)
 
   const renderTranslateBadge = () => {
@@ -360,7 +476,7 @@ export const LeadStory = memo(function LeadStory({
           data-reveal={revealed ? undefined : true}
           type="button"
           onClick={() => onOpen(article)}
-          className={`lead-hero group text-left ${variant === 'auto' ? 'lg:hidden' : ''}`}
+          className={`lead-hero group text-left ${framed ? 'is-framed' : ''} ${variant === 'auto' ? 'lg:hidden' : ''}`}
         >
           <InkImage
             src={cover || article.image}
@@ -400,12 +516,12 @@ export const LeadStory = memo(function LeadStory({
               )}
               {renderTranslateBadge()}
             </span>
-            <span className="lead-title mt-1.5 block text-[20px] font-medium leading-[1.32] sm:text-[22px]">
+            <span className="lead-title mt-1.5 line-clamp-3 text-[20px] font-medium leading-[1.32] sm:text-[22px]">
               {activeTitle}
             </span>
             {isTranslated && displayMode === 'compare' && (
-              <span className="lead-hero-summary mt-1 block font-sans text-[12px] leading-snug line-clamp-1 italic">
-                {article.title}
+              <span className="lead-hero-summary mt-1 font-sans text-[12px] leading-snug line-clamp-1 italic">
+                {originalDisplayTitle}
               </span>
             )}
             {displaySummary && (
@@ -482,7 +598,7 @@ export const LeadStory = memo(function LeadStory({
                 </div>
 
                 <h1
-                  className={`lead-title mt-4 text-[26px] xl:text-[30px] leading-[1.32] font-medium transition-colors duration-200 ${
+                  className={`lead-title mt-4 line-clamp-3 text-[26px] xl:text-[30px] leading-[1.32] font-medium transition-colors duration-200 ${
                     read
                       ? 'text-paper-muted/90'
                       : 'text-paper group-hover:text-cinnabar'
@@ -493,7 +609,7 @@ export const LeadStory = memo(function LeadStory({
 
                 {isTranslated && displayMode === 'compare' && (
                   <p className="mt-1.5 font-sans text-[13px] leading-snug text-paper-faint/85 line-clamp-1 italic">
-                    {article.title}
+                    {originalDisplayTitle}
                   </p>
                 )}
 

@@ -89,7 +89,7 @@ import { TypographyScreen } from './screens/settings/TypographyScreen'
 import { TranslationScreen } from './screens/settings/TranslationScreen'
 import { AiSettingsScreen } from './screens/settings/AiSettingsScreen'
 import { ProxyScreen } from './screens/settings/ProxyScreen'
-import { ConfirmDialog } from './components/ConfirmDialog'
+import { ConfirmDialog, OptionPickerDialog } from './components/ConfirmDialog'
 import {
   BRAND_TITLE,
   CurrentEasterEgg,
@@ -97,6 +97,8 @@ import {
   useEasterEggTrigger,
 } from './features/easterEgg'
 import { proxyModeLabel } from './features/proxy/config'
+import { loadActiveSiteId, saveActiveSiteId } from './features/sites/layoutState'
+import type { SiteId } from './features/sites/types'
 import { useProductTour } from './features/productTour/useProductTour'
 import { UpdateDialog } from './features/appUpdate/UpdateDialog'
 import { useAppUpdate } from './features/appUpdate/useAppUpdate'
@@ -106,8 +108,10 @@ import {
   translationLanguageLabel,
   translationProviderLabel,
 } from './features/translation/config'
-import { RECOMMEND_CATEGORY_ID, type CategoryId } from './sources/categories'
+import { resolveAiFeatureConfig } from './features/translation/aiConfig'
+import { FAVORITES_CATEGORY_ID, RECOMMEND_CATEGORY_ID, type CategoryId } from './sources/categories'
 import {
+  FOLLOWS_ENABLED_SOURCES,
   FONT_FAMILY_OPTIONS,
   FONT_SCALE_OPTIONS,
   addCustomCategory,
@@ -119,12 +123,15 @@ import {
   deleteCustomSource,
   deleteCustomSources,
   recommendationScopeSourceIds,
+  renameCategory,
+  removeCategorySource,
   resetCategoryLayout,
   resetCategorySources,
   resetTypography,
   setAutoRefreshOnCategorySwitch,
   setCategoryOrder,
   setEinkMode,
+  setHomeFeedLayout,
   setPrestoreEnabled,
   setPrestorePerSourceLimit,
   setRecommendEnabled,
@@ -134,19 +141,27 @@ import {
   setThemeMode,
   sourceIdsForCategoryWithPrefs,
   toggleCategorySource,
+  toggleFavoriteSource,
   toggleCategoryVisible,
   updateCustomCategory,
   updateCustomSource,
   updateTypography,
   visibleCategories,
+  withFavoriteCategory,
   withRecommendCategory,
   type TypographyPrefs,
 } from './sources/preferences'
-import { SOURCES, findSource } from './sources/registry'
+import { SITES, SOURCES, findSite, findSource } from './sources/registry'
 
 const ReaderScreen = lazy(() =>
   import('./screens/ReaderScreen').then((module) => ({
     default: module.ReaderScreen,
+  })),
+)
+
+const ZhihuWorkspace = lazy(() =>
+  import('./features/zhihu/ui/ZhihuWorkspace').then((module) => ({
+    default: module.ZhihuWorkspace,
   })),
 )
 
@@ -250,7 +265,17 @@ function prefetchBody(task: BodyPrefetchTask): void {
 
 export default function App() {
   const { prefs, resolvedTheme, update, replaceFromSync: replacePreferences } = usePreferences()
+  const speedReadConfig = useMemo(
+    () => resolveAiFeatureConfig({ ai: prefs.translation.ai }, 'speedRead'),
+    [prefs.translation.ai],
+  )
   const [tab, setTab] = useState<TabKey>('today')
+  const [activeSiteId, setActiveSiteId] = useState<SiteId | null>(() => loadActiveSiteId())
+  const siteBackHandlerRef = useRef<(() => boolean) | null>(null)
+  const leaveActiveSite = useCallback(() => {
+    saveActiveSiteId(null)
+    setActiveSiteId(null)
+  }, [])
   const [todayPullRefreshSeq, setTodayPullRefreshSeq] = useState(0)
   const [categoryId, setCategoryId] = useState<CategoryId>(
     () => defaultFeedCategoryId(visibleCategories(prefs)),
@@ -339,6 +364,7 @@ export default function App() {
   }, [sharedEntry])
   /** 墨水屏中区进设置时暂存文章，从「我的」返回时恢复阅读 */
   const [readerReturnArticle, setReaderReturnArticle] = useState<Article | null>(null)
+  const [readerReturnSiteId, setReaderReturnSiteId] = useState<SiteId | null>(null)
   const readerOverlayCloserRef = useRef<(() => boolean) | null>(null)
   const [eggOpen, setEggOpen] = useState(false)
   const openEgg = useCallback(() => setEggOpen(true), [])
@@ -354,6 +380,7 @@ export default function App() {
   const { start: startProductTourNow, stopIfActive: stopProductTourIfActive } = useProductTour({
     ready:
       tab === 'today' &&
+      !activeSiteId &&
       !reading &&
       !settingsRoute &&
       !focusSourceId &&
@@ -428,8 +455,12 @@ export default function App() {
 
   /** 首页轨道：推荐亮起时插到最前；默认选中与回退永远落在第一个普通分类 */
   const categories = useMemo(
-    () => withRecommendCategory(regularCategories, recommendReady),
-    [regularCategories, recommendReady],
+    () =>
+      withFavoriteCategory(
+        withRecommendCategory(regularCategories, recommendReady),
+        prefs.favoriteSourceIds,
+      ),
+    [regularCategories, recommendReady, prefs.favoriteSourceIds],
   )
 
   // 当前分类失效（被隐藏 / 推荐熄灭 / 首次进入不可见）时退回第一个普通分类，绝不自动落到推荐
@@ -525,9 +556,14 @@ export default function App() {
   const restoreReaderFromSettings = useCallback(() => {
     if (!readerReturnArticle) return
     setSettingsRoute(null)
+    if (readerReturnSiteId) {
+      saveActiveSiteId(readerReturnSiteId)
+      setActiveSiteId(readerReturnSiteId)
+    }
     setReading(readerReturnArticle)
     setReaderReturnArticle(null)
-  }, [readerReturnArticle])
+    setReaderReturnSiteId(null)
+  }, [readerReturnArticle, readerReturnSiteId])
 
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return
@@ -551,6 +587,11 @@ export default function App() {
       }
       if (reading) {
         closeReader()
+        return
+      }
+      if (activeSiteId) {
+        if (siteBackHandlerRef.current?.()) return
+        leaveActiveSite()
         return
       }
       if (settingsRoute?.name === 'category-sources' || settingsRoute?.name === 'category-edit') {
@@ -602,7 +643,7 @@ export default function App() {
       disposed = true
       if (removeListener) void removeListener()
     }
-  }, [closeReader, closeSourceFeed, eggOpen, focusSourceId, readerReturnArticle, reading, restoreReaderFromSettings, settingsRoute, stopProductTourIfActive, tab])
+  }, [activeSiteId, closeReader, closeSourceFeed, eggOpen, focusSourceId, leaveActiveSite, readerReturnArticle, reading, restoreReaderFromSettings, settingsRoute, stopProductTourIfActive, tab])
 
   const {
     articles: fetchedArticles,
@@ -735,6 +776,36 @@ export default function App() {
     setCategoryId(newId)
     setCategoryFilterSourceId(null)
   }, [])
+
+  const handleToggleFavoriteSource = useCallback(
+    (sourceId: string) => update((prev) => toggleFavoriteSource(prev, sourceId)),
+    [update],
+  )
+
+  const handleRemoveCategorySource = useCallback(
+    (sourceId: string) => {
+      if (categoryId === FAVORITES_CATEGORY_ID || categoryId === RECOMMEND_CATEGORY_ID) return
+      if (categoryId === FOLLOWS_ENABLED_SOURCES) {
+        setEnabledIds((prev) => prev.filter((id) => id !== sourceId))
+      } else {
+        update((prev) => removeCategorySource(prev, categoryId, sourceId))
+      }
+      setCategoryFilterSourceId((prev) => (prev === sourceId ? null : prev))
+    },
+    [categoryId, update],
+  )
+
+  const handleRemoveCategory = useCallback(
+    (id: CategoryId) => update((prev) => toggleCategoryVisible(prev, id)),
+    [update],
+  )
+
+  const handleRenameCategory = useCallback(
+    (id: CategoryId, name: string) => {
+      update((prev) => renameCategory(prev, id, name))
+    },
+    [update],
+  )
 
   const laterIds = useMemo(() => new Set(later.map((item) => item.id)), [later])
 
@@ -921,31 +992,60 @@ export default function App() {
         name: preset.name,
         description: preset.description,
         builtin: true,
-        active: preset.id === activeId,
+        active: !activeSiteId && preset.id === activeId,
       })),
       ...presets.state.userPresets.map((preset) => ({
         id: preset.id,
         name: preset.name,
         description: preset.description,
         builtin: false,
-        active: preset.id === activeId,
+        active: !activeSiteId && preset.id === activeId,
       })),
     ]
-  }, [presets.builtins, presets.state])
+  }, [activeSiteId, presets.builtins, presets.state])
 
   const frameworkSiteCount = useMemo(
     () => (prefs.customSources ?? []).filter((s) => s.frameworkHint && s.kind === 'web-catalog').length,
     [prefs.customSources],
   )
 
+  const siteSwitcherItems = useMemo(
+    () => SITES.map((site) => ({
+      id: site.id,
+      name: site.name,
+      description: site.description,
+      active: site.id === activeSiteId,
+    })),
+    [activeSiteId],
+  )
+
   const presetSwitcherConfig = useMemo(() => ({
-    activeName: presets.activePreset?.name ?? '场景预设',
+    activeName: findSite(activeSiteId)?.name ?? presets.activePreset?.name ?? '场景预设',
     items: presetSwitcherItems,
-    onSelect: (id: string) => presets.applyPreset(id),
-    onManage: () => setSettingsRoute({ name: 'presets' }),
-    onSites: frameworkSiteCount > 0 ? () => setTab('sites') : undefined,
+    onSelect: (id: string) => {
+      if (activeSiteId) leaveActiveSite()
+      if (id !== presets.state.activePresetId) presets.applyPreset(id)
+    },
+    onManage: () => {
+      if (activeSiteId) leaveActiveSite()
+      setSettingsRoute({ name: 'presets' })
+    },
+    siteItems: siteSwitcherItems,
+    onSelectSite: (id: string) => {
+      const site = findSite(id)
+      if (!site) return
+      setSettingsRoute(null)
+      setFocusSourceId(null)
+      setFocusReturnRoute(null)
+      saveActiveSiteId(site.id)
+      setActiveSiteId(site.id)
+    },
+    onSites: frameworkSiteCount > 0 ? () => {
+      if (activeSiteId) leaveActiveSite()
+      setTab('sites')
+    } : undefined,
     siteCount: frameworkSiteCount,
-  }), [presets, presetSwitcherItems, frameworkSiteCount])
+  }), [activeSiteId, frameworkSiteCount, leaveActiveSite, presetSwitcherItems, presets, siteSwitcherItems])
 
   const cachedHistory = useMemo(
     () =>
@@ -990,8 +1090,9 @@ export default function App() {
       prefs.theme === 'system'
         ? `跟随系统 · 当前${current}`
         : `${mode?.label ?? '夜读'} · ${mode?.caption ?? ''}`
-    return `${scheme?.label ?? '墨问'} · ${themeSummary}`
-  }, [prefs.scheme, prefs.theme, resolvedTheme])
+    const layoutSummary = prefs.homeFeedLayout === 'cards' ? '双栏卡片' : '经典列表'
+    return `${scheme?.label ?? '墨问'} · ${themeSummary} · ${layoutSummary}`
+  }, [prefs.homeFeedLayout, prefs.scheme, prefs.theme, resolvedTheme])
 
   const translationSummary = useMemo(
     () =>
@@ -1035,10 +1136,12 @@ export default function App() {
           resolved={resolvedTheme}
           scheme={prefs.scheme}
           customScheme={prefs.customScheme}
+          homeFeedLayout={prefs.homeFeedLayout}
           einkMode={Boolean(prefs.einkMode)}
           onChange={(theme) => update((prev) => setThemeMode(prev, theme))}
           onSchemeChange={(scheme) => update((prev) => selectThemeScheme(prev, scheme))}
           onEditCustomScheme={() => setSettingsRoute({ name: 'custom-scheme' })}
+          onHomeFeedLayoutChange={(layout) => update((prev) => setHomeFeedLayout(prev, layout))}
           onEinkModeChange={(enabled) => update((prev) => setEinkMode(prev, enabled))}
           onBack={() => setSettingsRoute(null)}
         />
@@ -1281,14 +1384,13 @@ export default function App() {
           hasUpdate={appUpdate.hasUpdate}
           availableVersion={appUpdate.availableVersion}
           onCheckUpdate={() => void appUpdate.promptManualCheck()}
+          updateTrack={appUpdate.updateTrack}
+          onOpenUpdateTrack={appUpdate.onOpenTrackPicker}
           onOpenChangelog={() => setSettingsRoute({ name: 'changelog' })}
           onOpenLicenses={() => setSettingsRoute({ name: 'licenses' })}
           onReplayTour={replayProductTour}
           flavorSwitchSupported={appUpdate.supported}
-          currentChannelLabel={appUpdate.currentChannel === 'local' ? '离线翻译版' : '云端版'}
-          flavorSwitchTitle={
-            appUpdate.oppositeChannel === 'local' ? '切换到离线翻译版' : '切换到云端版'
-          }
+          currentFlavorLabel={appUpdate.currentFlavor === 'local' ? '离线翻译版' : '云端版'}
           flavorSwitchCaption={appUpdate.flavorSwitchCaption}
           onSwitchFlavor={appUpdate.onPromptFlavorSwitch}
         />
@@ -1451,6 +1553,7 @@ export default function App() {
         laterIds={laterIds}
         prestoredIds={prestore.articleIds}
         showLead
+        homeFeedLayout={prefs.homeFeedLayout}
         offline={offline}
         categories={categories}
         categoryId={categoryId}
@@ -1458,8 +1561,16 @@ export default function App() {
         availableSources={availableCategorySources}
         selectedSourceId={categoryFilterSourceId}
         onSelectSource={setCategoryFilterSourceId}
+        favoriteSourceIds={prefs.favoriteSourceIds}
+        onToggleFavoriteSource={handleToggleFavoriteSource}
+        onRemoveSource={
+          categoryId === FAVORITES_CATEGORY_ID || categoryId === RECOMMEND_CATEGORY_ID
+            ? undefined
+            : handleRemoveCategorySource
+        }
+        onRemoveCategory={handleRemoveCategory}
+        onRenameCategory={handleRenameCategory}
         articlesForCategory={articlesForCategory}
-        presetSwitcher={presetSwitcherConfig}
         translationPrefs={prefs.translation}
         customSources={prefs.customSources}
         onRefresh={runRefresh}
@@ -1477,7 +1588,7 @@ export default function App() {
   return (
     <AppShell>
       <div className="flex h-full w-full flex-row overflow-hidden">
-        <DesktopSidebar
+        {!activeSiteId && <DesktopSidebar
           categories={categories}
           activeCategoryId={categoryId}
           onCategoryChange={(newId) => {
@@ -1497,14 +1608,7 @@ export default function App() {
           onToggleTheme={() => {
             update((prev) => setThemeMode(prev, resolvedTheme === 'dark' ? 'light' : 'dark'))
           }}
-          presetSwitcher={{
-            activeName: presets.activePreset?.name ?? '场景预设',
-            items: presetSwitcherItems,
-            onSelect: (id) => presets.applyPreset(id),
-            onManage: () => setSettingsRoute({ name: 'presets' }),
-            onSites: frameworkSiteCount > 0 ? () => setTab('sites') : undefined,
-            siteCount: frameworkSiteCount,
-          }}
+          presetSwitcher={presetSwitcherConfig}
           onNavigateHome={() => {
             setTab('today')
             setSettingsRoute(null)
@@ -1518,7 +1622,7 @@ export default function App() {
           }}
           onNavigateAbout={() => setSettingsRoute({ name: 'about' })}
           onBrandTap={onBrandTap}
-        />
+        />}
 
         {/*
           风格引导期间把内容区搁起：Chrome 69–84 用 display:none 兼容回退，Chrome 85+
@@ -1530,24 +1634,48 @@ export default function App() {
             showSchemeOnboarding ? ' content-parked' : ''
           }`}
         >
-          {renderTab()}
+          {activeSiteId === 'zhihu' ? (
+            <Suspense
+              fallback={
+                <div role="status" className="flex h-full items-center justify-center font-mono text-[12px] text-paper-faint">
+                  正在打开知乎工作区…
+                </div>
+              }
+            >
+              <ZhihuWorkspace
+                onExit={leaveActiveSite}
+                backHandlerRef={siteBackHandlerRef}
+                presetSwitcher={presetSwitcherConfig}
+                fontScale={prefs.typography.fontScale}
+                onFontScale={(next) =>
+                  update((prev) => updateTypography(prev, { fontScale: next }))
+                }
+                speedReadConfig={speedReadConfig}
+              />
+            </Suspense>
+          ) : (
+            <>
+              {renderTab()}
 
-          {!focusSource && (
-            <TabBar
-              active={tab}
-              laterCount={later.length}
-              hasUpdate={appUpdate.hasUpdate}
-              onChange={(key) => {
-                setFocusSourceId(null)
-                setFocusReturnRoute(null)
-                if (key !== 'me') setReaderReturnArticle(null)
-                setTab(key)
-              }}
-              onTodayDoubleTap={() => setTodayPullRefreshSeq((seq) => seq + 1)}
-            />
+              {!focusSource && (
+                <TabBar
+                  active={tab}
+                  laterCount={later.length}
+                  hasUpdate={appUpdate.hasUpdate}
+                  onChange={(key) => {
+                    setFocusSourceId(null)
+                    setFocusReturnRoute(null)
+                    if (key !== 'me') setReaderReturnArticle(null)
+                    setTab(key)
+                  }}
+                  onTodayDoubleTap={() => setTodayPullRefreshSeq((seq) => seq + 1)}
+                  presetSwitcher={presetSwitcherConfig}
+                />
+              )}
+
+              {renderSettings()}
+            </>
           )}
-
-          {renderSettings()}
         </main>
       </div>
 
@@ -1590,6 +1718,8 @@ export default function App() {
             onTypographyChange={(patch) => update((prev) => updateTypography(prev, patch))}
             onOpenSettings={() => {
               setReaderReturnArticle(reading)
+              setReaderReturnSiteId(activeSiteId)
+              if (activeSiteId) leaveActiveSite()
               setReading(null)
               setSettingsRoute(null)
               setTab('me')
@@ -1645,6 +1775,26 @@ export default function App() {
         onUpdate={appUpdate.onUpdate}
         onLater={appUpdate.onLater}
         onSkip={appUpdate.onSkip}
+      />
+      <OptionPickerDialog
+        open={appUpdate.trackPickerOpen}
+        title="更新通道"
+        value={appUpdate.updateTrack}
+        options={[
+          { id: 'stable', label: '正式版 · 稳定更新，推荐日常使用' },
+          { id: 'beta', label: '内测版 · 提前体验开发中的版本' },
+        ]}
+        onChange={appUpdate.onChangeUpdateTrack}
+        onCancel={appUpdate.onCloseTrackPicker}
+      />
+      <ConfirmDialog
+        open={appUpdate.betaConfirmOpen}
+        title="加入内测版"
+        message="内测版会更早收到开发中的新版本，更新更频繁，也可能存在尚未发现的稳定性问题。加入后只改变更新订阅，不会在当前正式版中提前开启任何业务功能。"
+        confirmLabel="加入内测"
+        cancelLabel="取消"
+        onConfirm={appUpdate.onConfirmBetaTrack}
+        onCancel={appUpdate.onCancelBetaTrack}
       />
       <ConfirmDialog
         open={appUpdate.installPermissionOpen}

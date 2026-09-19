@@ -1,6 +1,7 @@
 package com.aizeek.newsnook;
 
 import android.util.Base64;
+import com.getcapacitor.JSArray;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -31,6 +32,13 @@ public class ProxiedHttpPlugin extends Plugin {
     private static final MediaType FORM =
         MediaType.parse("application/x-www-form-urlencoded; charset=UTF-8");
 
+    // OkHttpClient 本身就是面向进程复用设计的。每个请求都 new client 会同时丢掉
+    // DNS/连接池/TLS session 复用，知乎这类连续分页请求会被放大成大量 TLS 握手。
+    // newBuilder() 仍允许每个请求设置独立超时/代理，但共享 dispatcher 与 connectionPool。
+    private final OkHttpClient sharedClient = new OkHttpClient.Builder()
+        .retryOnConnectionFailure(true)
+        .build();
+
     @PluginMethod
     public void request(PluginCall call) {
         String url = call.getString("url");
@@ -45,13 +53,15 @@ public class ProxiedHttpPlugin extends Plugin {
 
         JSObject headersObj = call.getObject("headers");
         String body = call.getString("data");
+        String bodyBase64 = call.getString("dataBase64");
+        boolean omitContentType = Boolean.TRUE.equals(call.getBoolean("omitContentType", false));
         JSObject proxyObj = call.getObject("proxy");
 
         int connectTimeout = call.getInt("connectTimeout", 15000);
         int readTimeout = call.getInt("readTimeout", 25000);
         boolean followRedirects = Boolean.TRUE.equals(call.getBoolean("followRedirects", false));
 
-        OkHttpClient.Builder clientBuilder = new OkHttpClient.Builder()
+        OkHttpClient.Builder clientBuilder = sharedClient.newBuilder()
             .connectTimeout(connectTimeout, TimeUnit.MILLISECONDS)
             .readTimeout(readTimeout, TimeUnit.MILLISECONDS)
             .writeTimeout(readTimeout, TimeUnit.MILLISECONDS)
@@ -111,8 +121,18 @@ public class ProxiedHttpPlugin extends Plugin {
 
         if ("POST".equals(method) || "PUT".equals(method) || "PATCH".equals(method)) {
             String contentType = headersObj != null ? headersObj.getString("Content-Type") : null;
-            MediaType mediaType = contentType != null ? MediaType.parse(contentType) : FORM;
-            RequestBody requestBody = RequestBody.create(body != null ? body : "", mediaType);
+            MediaType mediaType = omitContentType ? null : (contentType != null ? MediaType.parse(contentType) : FORM);
+            RequestBody requestBody;
+            if (bodyBase64 != null) {
+                try {
+                    requestBody = RequestBody.create(Base64.decode(bodyBase64, Base64.DEFAULT), mediaType);
+                } catch (IllegalArgumentException error) {
+                    call.reject("请求体 dataBase64 不是有效 base64");
+                    return;
+                }
+            } else {
+                requestBody = RequestBody.create(body != null ? body : "", mediaType);
+            }
             requestBuilder.method(method, requestBody);
         } else if ("HEAD".equals(method) || "DELETE".equals(method)) {
             requestBuilder.method(method, null);
@@ -132,6 +152,15 @@ public class ProxiedHttpPlugin extends Plugin {
                 responseHeaders.put(name, response.header(name));
             }
             result.put("headers", responseHeaders);
+
+            // Headers.get()/response.header() 只能得到同名 header 的最后一个值。
+            // Set-Cookie 不能安全用逗号拼接（Expires 本身含逗号），因此单独把所有
+            // Set-Cookie 原样返回给 JS，供需要长期会话的站点精确更新 cookie jar。
+            JSArray setCookies = new JSArray();
+            for (String setCookie : response.headers("Set-Cookie")) {
+                setCookies.put(setCookie);
+            }
+            result.put("setCookies", setCookies);
 
             ResponseBody responseBody = response.body();
             byte[] bytes = responseBody != null ? responseBody.bytes() : new byte[0];

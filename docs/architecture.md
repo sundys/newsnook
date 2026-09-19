@@ -66,6 +66,7 @@ newsnook/
 │  features/translation/   TranslationService + Provider 接口    │
 │  features/proxy/         智能分流 / 隧道 / 原生 HTTP 封装       │
 │  features/comments/      跟贴 Provider（网易/知乎/煎蛋等）      │
+│  features/zhihu/         独立知乎工作区 / 协议能力矩阵 / adapter │
 │  features/mediaSniffer/  媒体候选 / HLS·DASH 清单 / DRM 状态  │
 │  features/appUpdate/     GitHub Release 检测与应用内更新        │
 ├──────────────────────────────────────────────────────────────┤
@@ -105,6 +106,30 @@ UI 不直接拼上游 URL；源 URL 与 kind 只来自 `sources/registry.ts`（�
 
 Android 物理返回键由 `@capacitor/app` 在 `App.tsx` 统一处理：阅读器 → 设置栈 → 单源焦点 → 退出确认。
 
+### 6.1 独立站点工作区
+
+`features/sites/*` 与 `sources/registry/sites.ts` 提供独立站点描述符；它和新闻 `preset/source/category` 是两条状态轴。当前第一个独立站点是知乎：
+
+```text
+PresetSwitcher / 切换布局
+  ├─ 场景预设 → presets.applyPreset(...)
+  └─ 第三方站点 / 知乎 → activeSiteId = 'zhihu'
+                              ↓
+                         ZhihuWorkspace (lazy)
+                              ↓
+                 feature-local RouteFrame[] 返回栈
+```
+
+- 选择知乎**不得**调用 `presets.applyPreset`，也不改变启用源、分类和 `activePresetId`；`activeSiteId` 仅用独立 `newsnook:layout:active-site:v1` 保存。
+- 知乎工作区挂载自己的顶栏、底部导航和 route reducer；普通 `DesktopSidebar` / `TabBar` 不叠加。Android 返回键先弹知乎局部栈，到根页再退出工作区。
+- `zhihu-community` 是 `workspaceOnly` 公共 Article 桥接源：`findSource`/分享能识别它，但 `allRegisteredSources` 排除它；即使误走 `parseSourcePayload` 也会显式抛错，因此不会混进普通综合刷新。
+- `zhihu-daily` 继续保持原 `kind: 'zhihu'` 和日期游标解析，社区适配绝不复用日报语义。
+- `features/zhihu/protocol.ts` 是远端能力的权威 contract；API client 在 transport 之前执行强制能力闸门，UI 只做第二层可用性提示。`source-only` 只表示源码/脱敏语料证明“曾存在这种协议”，不等于线上已验证；有明确 endpoint 与完整本地实现的 source-only 操作可以受控尝试，由真实上游响应决定成功/失败，未知/缺少 endpoint 的写操作保持 blocked。写操作统一 `retry=never`，不得伪造成功。详见 [知乎协议矩阵](./zhihu-protocol.md)。
+- Android transport 仅接受知乎白名单 HTTPS 域 (`www.zhihu.com` / `api.zhihu.com`，以及被显式列入上传流程的受限域)，GET 才允许一次安全重试，写操作始终 `retry=never`。会话 generation 在请求前后校验，账号切换后旧响应不得提交。知乎凭据使用 `site.zhihu.*` SecureStore 命名空间；私信/评论输入与本机创作草稿使用账号隔离 IndexedDB，不进入 Preferences、配置备份、公共正文缓存或 Cloud Sync。
+- Android 已实现受控第一方 WebView 登录/验证码返回、多账号保存/切换/移除与 `/api/v4/me` 身份校验，但当前仓库没有授权实网会话，因此认证及所有账号私有远端能力仍保持 `source-only`，不能把“代码可执行”写成“线上已验证”。
+- 知乎“推荐”默认走 `feed/smart.ts` 的本地 Smart 协调层：匿名并行召回 Android topstory、Web topstory、热榜，登录后额外加入关注动态；公开摘要进入有 TTL/容量上限的 `newsnook:zhihu:smart-candidates:v1` 候选池，关注动态只驻留当前账号内存会话，禁止写入公共 localStorage。排序结合作者/内容类型亲和、新鲜度、讨论度与真实曝光疲劳，再做作者/问题/类型/来源多样性重排；稳定推荐会话只向尾部追加，已经展示的前缀不因补池重排。卡片达到可见阈值并停留后才记 impression；已登录会话以 best-effort 方式向知乎 `lastread/touch` 回传 `touch/read`，失败不得阻断阅读。完整设计见 [Smart Recommendation V2](./superpowers/specs/2026-09-18-zhihu-smart-recommendation-v2.md)。
+- 旧 Web/Android/Mixed/Local 推荐路径保留为诊断与回归能力；Smart/Local 的个性化结果不进入不分账号的 `newsnook:zhihu:public-feed:v1:*` 公共 feed cache。正文桥接使用 `feedArticleId('zhihu-community', canonicalUrl)`，分享发出/接收必须保持同一 Article.id。
+
 ## 7. 源模型
 
 ### 7.1 SourceKind
@@ -116,6 +141,7 @@ Android 物理返回键由 `@capacitor/app` 在 `App.tsx` 统一处理：阅读�
 | 通用 Feed | `feed` | RSS 2.0 / Atom / RDF / JSON Feed |
 | 搜索聚合 | `google-news` | Google News RSS，需解码真实 URL |
 | 门户 JSON | `netease`、`zhihu` | 网易移动端列表、知乎日报 |
+| 独立站点桥接 | `zhihu-community` | 仅用于知乎专属工作区公共 Article/分享识别；`workspaceOnly`，不进普通 Feed 刷新 |
 | 站点定制 | `latepost`、`jandan`、`jiqizhixin`、`cls`、`eastmoney-*`、`wscn-live`、`guokr`、`jazzyear`、`arena`、`anthropic`、`claude-webflow`、`claude-academy`、`openai-cookbook`、`paulgraham`、`wordpress` 等 | 各站列表/详情协议与 UA 在 registry 中声明 |
 | 用户自建 | `feed`（`isCustom: true`） | OPML 导入或手动添加，走通用解析 |
 
@@ -127,15 +153,15 @@ Android 物理返回键由 `@capacitor/app` 在 `App.tsx` 统一处理：阅读�
 
 - **综合**：跟随用户启用的全部源
 - **推荐**（`recommend`）：动态聚合栏位，**不进注册表、不落分类布局偏好**——每个预设的候选池严格为该预设启用的全部信源（可见分类并集，综合贡献频道启用列表），预设内阅读量达到 `lib/recommend.ts` 的阈值后才在轨道最前出现，且默认焦点永远是第一个普通分类；条目由本机已读画像重排（纯本地，冷启动退化为按时间），推荐栏内下拉刷新即基于最新已读重建画像并重排。偏好里的 `recommendEnabled` 总开关（默认开启，设置入口在「分类与信源」）可整体关闭该栏位。「推荐」为自建分类保留名。原理、权重与效果见 [本地推荐](./local-recommend.md)
-- 其余分类：绑定默认 `sourceIds`，可由偏好覆盖；主题栏按正文语言拆成中文栏与「·外刊」栏，内置预设默认隐藏「综合」
+- 其余分类：绑定默认 `sourceIds`，可由偏好覆盖；内置分类重命名只写当前预设的 `categoryNames` 显示覆盖，不改变稳定分类 id 与信源契约；主题栏按正文语言拆成中文栏与「·外刊」栏，内置预设默认隐藏「综合」
 
-场景预设（`sources/presets.ts` + `hooks/usePresets.ts`）：快照分类顺序/显隐、各类别选源与综合频道启用列表。内置可就地改并覆盖存储，另存为才复制成用户预设；`activePresetId` 可直接指向内置 id。推荐栏不进预设快照——它按各预设的阅读行为在运行时动态出现。
+场景预设（`sources/presets.ts` + `hooks/usePresets.ts`）：快照分类顺序/显隐/显示名称、各类别选源与综合频道启用列表。内置可就地改并覆盖存储，另存为才复制成用户预设；`activePresetId` 可直接指向内置 id。推荐栏不进预设快照——它按各预设的阅读行为在运行时动态出现。
 
 ### 7.3 用户偏好
 
 `sources/preferences.ts` + `hooks/usePreferences.ts` 管理：
 
-- 分类顺序/显隐、分类选源、综合频道启用列表
+- 分类顺序/显隐/显示名称、分类选源、综合频道启用列表
 - 正文字号/字体/行高/段距/首行缩进（CSS 变量注入阅读器）
 - 主题 `system | light | dark`；风格方案 `ink | celadon | pearl | custom`（与明暗正交，custom 配色见 `lib/customScheme.ts`）；**墨水屏** `einkMode`（行为叠加，非第三主题）
 - 翻译引擎、语言、呈现方式、云 API 配置、列表标题翻译

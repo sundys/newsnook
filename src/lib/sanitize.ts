@@ -16,6 +16,56 @@ function createPurify(): PurifyLike {
 
 const DOMPurify = createPurify()
 
+const ARTICLE_DROP_TAGS = new Set([
+  'script',
+  'style',
+  'form',
+  'input',
+  'button',
+  'textarea',
+  'select',
+  'object',
+  'embed',
+  'link',
+  'meta',
+])
+
+const ARTICLE_FORBID_ATTRS = new Set(['style', 'class', 'align', 'bgcolor'])
+const ARTICLE_URI_ATTRS = new Set(['href', 'src', 'poster'])
+const SAFE_ARTICLE_URI = /^(?:(?:https?|mailto):|\/api\/image\?)/i
+
+/**
+ * DOMPurify 在 linkedom 等非浏览器 DOM 上可能 `isSupported=false` 并原样返回输入。
+ * 正文清洗不能把运行环境差异变成 XSS 缺口，因此在 DOMPurify 后再做一层最小安全栅栏。
+ * 浏览器里它通常只是幂等检查；Node 测试/SSR 场景则承担实际兜底。
+ */
+function enforceArticleHtmlSecurity(html: string): string {
+  const { document } = parseHTML('<!doctype html><html><body></body></html>')
+  document.body.innerHTML = html
+
+  for (const element of [...document.body.querySelectorAll('*')]) {
+    const tag = element.tagName.toLowerCase()
+    if (ARTICLE_DROP_TAGS.has(tag)) {
+      element.remove()
+      continue
+    }
+
+    for (const attr of [...element.attributes]) {
+      const name = attr.name.toLowerCase()
+      if (name.startsWith('on') || ARTICLE_FORBID_ATTRS.has(name)) {
+        element.removeAttribute(attr.name)
+        continue
+      }
+      if (ARTICLE_URI_ATTRS.has(name)) {
+        const value = attr.value.trim()
+        if (value && !SAFE_ARTICLE_URI.test(value)) element.removeAttribute(attr.name)
+      }
+    }
+  }
+
+  return document.body.innerHTML
+}
+
 /**
  * France 24 等站点在抓取环境里会把 YouTube 同意/广告拦截提示渲染成正文段落。
  * 这些占位文字没有信息量，应剔除；原站 YouTube embed iframe 则白名单保留。
@@ -192,7 +242,7 @@ export function normalizeParagraphTypography(html: string): string {
 /** 正文来自第三方站点，渲染前统一清洗，并移除会破坏暗色版式的内联样式 */
 export function sanitizeArticleHtml(html: string): string {
   const withoutNoise = stripEmbedNoise(html)
-  const sanitized = DOMPurify.sanitize(withoutNoise, {
+  const purified = DOMPurify.sanitize(withoutNoise, {
     ADD_TAGS: ['video', 'source', 'iframe', 'audio'],
     ADD_ATTR: [
       'controls',
@@ -227,6 +277,20 @@ export function sanitizeArticleHtml(html: string): string {
       'data-media-pending',
       'data-source-page',
       'data-related-title',
+      'data-reader-image-fallbacks',
+      // 知乎段评：只保留本地注入的服务端 segment 元数据，供阅读层打开段评/点赞。
+      'data-zhihu-segment-id',
+      'data-zhihu-content-id',
+      'data-zhihu-content-type',
+      'data-zhihu-segment-pid',
+      'data-zhihu-segment-start',
+      'data-zhihu-segment-end',
+      'data-zhihu-segment-liked',
+      'data-zhihu-segment-like-count',
+      'data-zhihu-segment-comment-count',
+      'data-zhihu-segment-my-comment-count',
+      'data-zhihu-segment-is-span',
+      'data-zhihu-segment-display-text',
       'data-empty',
     ],
     FORBID_TAGS: ['style', 'script', 'form', 'input', 'button'],
@@ -234,6 +298,7 @@ export function sanitizeArticleHtml(html: string): string {
     // 允许 https? 以及本地图片代理路径
     ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto):|\/api\/image\?)/i,
   })
+  const sanitized = enforceArticleHtmlSecurity(purified)
   const stripped = stripEmptyArticleBlocks(keepAllowedAudio(keepAllowedEmbeds(sanitized)))
   return normalizeParagraphTypography(stripped)
 }

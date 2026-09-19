@@ -7,6 +7,10 @@ export type ProxiedHttpRequest = {
   method?: string
   headers?: Record<string, string>
   data?: string
+  /** 原始二进制请求体的 base64；与 data 二选一，原生层解码后再交给 OkHttp。 */
+  dataBase64?: string
+  /** OSS 等签名协议要求请求体存在但 Content-Type 行为空时使用；默认仍走既有 FORM fallback。 */
+  omitContentType?: boolean
   proxy?: NativeTunnelProxy
   connectTimeout?: number
   readTimeout?: number
@@ -17,6 +21,8 @@ export type ProxiedHttpRequest = {
 export type ProxiedHttpResponse = {
   status: number
   headers: Record<string, string>
+  /** 同名 Set-Cookie 必须逐条保留，不能用逗号拼接。旧版原生桥可能没有此字段。 */
+  setCookies?: string[]
   /** base64 编码的响应体 */
   data: string
 }

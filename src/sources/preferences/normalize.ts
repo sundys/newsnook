@@ -11,7 +11,13 @@ import {
 import { DEFAULT_CUSTOM_SCHEME, normalizeCustomScheme } from '../../lib/customScheme'
 import { normalizeTranslationPrefs } from '../../features/translation/config'
 import { normalizeProxyPrefs } from '../../features/proxy/config'
-import { CATEGORIES, PORTAL_CATEGORY_SOURCES, type CategoryId, type NewsCategory } from '../categories'
+import {
+  CATEGORIES,
+  isReservedCategoryLabel,
+  PORTAL_CATEGORY_SOURCES,
+  type CategoryId,
+  type NewsCategory,
+} from '../categories'
 import {
   SOURCES,
   makeCustomSourceId,
@@ -28,6 +34,7 @@ import {
   normalizePrestorePrefs,
   uniqueValid,
   type FontFamilyId,
+  type CategoryNameOverride,
   type Preferences,
   type TypographyPrefs,
 } from './model'
@@ -35,6 +42,7 @@ import { describeSources } from './categoryPrefs'
 
 /** 读入持久化数据时剔除已下线的分类与信源，避免脏配置导致空列表 */
 export function normalizePreferences(raw: unknown): Preferences {
+  const isFreshInstall = raw == null
   const input = (raw ?? {}) as Partial<Preferences>
   const typography = (input.typography ?? {}) as Partial<TypographyPrefs>
 
@@ -120,7 +128,24 @@ export function normalizePreferences(raw: unknown): Preferences {
     Object.entries(input.categorySources).forEach(([categoryId, sourceIds]) => {
       if (!allCategoryIds.has(categoryId) || isAggregateCategoryId(categoryId)) return
       const valid = uniqueValid(sourceIds, knownSourceIds)
-      if (valid.length) categorySources[categoryId] = valid
+      categorySources[categoryId] = valid
+    })
+  }
+
+  const categoryNames: Record<CategoryId, CategoryNameOverride> = {}
+  if (input.categoryNames && typeof input.categoryNames === 'object') {
+    const builtinIds = new Set(CATEGORIES.map((category) => category.id))
+    Object.entries(input.categoryNames).forEach(([categoryId, value]) => {
+      if (!builtinIds.has(categoryId) || !value || typeof value !== 'object') return
+      const override = value as Partial<CategoryNameOverride>
+      const label = typeof override.label === 'string' ? override.label.trim().slice(0, 16) : ''
+      if (!label || isReservedCategoryLabel(label)) return
+      const short =
+        typeof override.short === 'string' && override.short.trim()
+          ? override.short.trim().slice(0, 6)
+          : label.slice(0, 6)
+      if (isReservedCategoryLabel(short)) return
+      categoryNames[categoryId] = { label, short }
     })
   }
 
@@ -147,11 +172,20 @@ export function normalizePreferences(raw: unknown): Preferences {
     // 至少保留一个可见分类，否则首页无内容可选
     hiddenCategoryIds: hidden.length >= allCategoryIds.size ? hidden.slice(1) : hidden,
     categorySources,
+    categoryNames,
+    favoriteSourceIds: uniqueValid(input.favoriteSourceIds, knownSourceIds),
     customCategories,
     customSources,
     theme: isThemeMode(input.theme) ? input.theme : DEFAULT_THEME_MODE,
     scheme,
     customScheme,
+    // 新装没有任何持久化偏好时启用新版双栏；旧安装/旧备份缺字段时保持经典单栏，避免升级后突变。
+    homeFeedLayout:
+      input.homeFeedLayout === 'classic' || input.homeFeedLayout === 'cards'
+        ? input.homeFeedLayout
+        : isFreshInstall
+          ? 'cards'
+          : 'classic',
     translation: normalizeTranslationPrefs(input.translation),
     proxy: normalizeProxyPrefs(input.proxy),
     autoRefreshOnCategorySwitch:
