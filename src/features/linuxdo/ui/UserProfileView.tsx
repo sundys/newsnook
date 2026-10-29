@@ -1,0 +1,1703 @@
+import {
+  Award,
+  BadgeCheck,
+  BatteryLow,
+  Bookmark,
+  CheckCircle2,
+  Flame,
+  Heart,
+  HeartHandshake,
+  History,
+  KeyRound,
+  LayoutGrid,
+  Link2,
+  List,
+  LogOut,
+  Mail,
+  Medal,
+  MessageSquareQuote,
+  Pencil,
+  PenTool,
+  Settings,
+  Shield,
+  ShieldCheck,
+  Sparkles,
+  Star,
+  ThumbsUp,
+  Trophy,
+  UserCheck,
+  UserPlus,
+  Vote,
+  Zap,
+  BookOpen,
+  CalendarDays,
+  ChevronRight,
+  Clock3,
+  FileText,
+  Loader2,
+  MessageCircle,
+  RefreshCcw,
+  Rocket,
+  UserRound,
+} from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+
+import {
+  linuxDoDiscovery as discovery,
+  linuxDoPeople as peopleApi,
+} from '../runtime'
+import {
+  cleanBadgeDescription,
+  type LinuxDoBoostListItem,
+  type LinuxDoUserAction,
+  type LinuxDoUserActivity,
+  type LinuxDoUserActivityFilter,
+  type LinuxDoUserBadge,
+  type LinuxDoUserProfile,
+  type LinuxDoUserSummary,
+  type LinuxDoUserSummaryReply,
+  type LinuxDoUserSummaryTopic,
+} from '../people/service'
+import type { LinuxDoCategory, LinuxDoTopicSummary } from '../types'
+import type { LinuxDoSessionSnapshot } from '../types'
+import type { LinuxDoProfileDraft, LinuxDoProfileSection } from '../people/sections'
+import { ProfileSectionView } from './ProfileSectionView'
+import { BookmarksView } from './CommunityViews'
+import { ago, avatar, compact, isLinuxDoSiteAdmin, readableError, tagGlyph } from './utils'
+import { isLinuxDoVerificationError, LinuxDoRequestError, type LinuxDoVerify } from './VerificationAction'
+
+export interface UserProfileAccountControls {
+  onPrivateMessages?: () => void
+  onBookmarks?: () => void
+  onTrustLevel?: () => void
+  onLogout?: () => void | Promise<void>
+  onVerifyBrowser?: () => void | Promise<void>
+  onClearBrowserSession?: () => void | Promise<void>
+  accountError?: string
+  onClearAccountError?: () => void
+  capabilities?: {
+    uploads?: boolean
+    bookmarks?: boolean
+    boost?: { available: boolean; reason?: string }
+  }
+}
+
+export type UserProfileTab = 'overview' | 'activity' | 'topics' | 'replies' | 'likes' | 'boosts' | 'responses' | 'badges' | 'bookmarks' | LinuxDoProfileSection
+type ActivityTab = Extract<UserProfileTab, 'activity' | 'topics' | 'replies' | 'likes' | 'responses'>
+type BoostMode = 'received' | 'given'
+
+interface ActivityCacheEntry {
+  items: LinuxDoUserAction[]
+  nextOffset?: number
+  hasMore: boolean
+  loaded: boolean
+  loading: boolean
+  loadingMore: boolean
+  error: string
+}
+
+const profileTabs: Array<{ id: UserProfileTab; label: string; icon: typeof UserRound }> = [
+  { id: 'overview', label: '概览', icon: UserRound },
+  { id: 'activity', label: '所有', icon: Sparkles },
+  { id: 'topics', label: '话题', icon: FileText },
+  { id: 'replies', label: '回复', icon: MessageCircle },
+  { id: 'read', label: '已读', icon: BookOpen },
+  { id: 'drafts', label: '草稿', icon: Pencil },
+  { id: 'pending', label: '待处理', icon: Clock3 },
+  { id: 'likes', label: '赞', icon: Heart },
+  { id: 'bookmarks', label: '书签', icon: Bookmark },
+  { id: 'assigned', label: '已指定', icon: UserPlus },
+  { id: 'boosts', label: 'Boosts', icon: Rocket },
+  { id: 'reactions', label: '回应', icon: Sparkles },
+  { id: 'votes', label: '投票', icon: Vote },
+  { id: 'solved', label: '已解决', icon: CheckCircle2 },
+  { id: 'responses', label: '收到回复', icon: MessageCircle },
+  { id: 'badges', label: '徽章', icon: Award },
+]
+
+const activityFilter: Record<ActivityTab, LinuxDoUserActivityFilter> = {
+  activity: 'all',
+  topics: 'topics',
+  replies: 'replies',
+  likes: 'likes',
+  responses: 'responses',
+}
+
+function emptyActivity(): ActivityCacheEntry {
+  return {
+    items: [],
+    hasMore: false,
+    loaded: false,
+    loading: false,
+    loadingMore: false,
+    error: '',
+  }
+}
+
+function metric(value: number | undefined): string {
+  return value === undefined ? '—' : compact(value)
+}
+
+function duration(seconds: number | undefined): string {
+  if (seconds === undefined) return '—'
+  if (seconds < 60) return seconds + '秒'
+  const minutes = Math.round(seconds / 60)
+  if (minutes < 60) return minutes + '分钟'
+  const hours = Math.round(minutes / 6) / 10
+  return hours + '小时'
+}
+
+function dateLabel(value?: string): string {
+  if (!value) return ''
+  const timestamp = Date.parse(value)
+  if (!Number.isFinite(timestamp)) return ''
+  return new Date(timestamp).toLocaleDateString('zh-CN', { year: 'numeric', month: 'short', day: 'numeric' })
+}
+
+function summaryToTopic(topic: LinuxDoUserSummaryTopic): LinuxDoTopicSummary {
+  return {
+    id: topic.id,
+    slug: topic.slug || 'topic',
+    title: topic.title,
+    postsCount: topic.postsCount ?? 0,
+    replyCount: Math.max(0, (topic.postsCount ?? 1) - 1),
+    views: 0,
+    likeCount: topic.likeCount ?? 0,
+    createdAt: topic.createdAt ?? '',
+    lastPostedAt: topic.createdAt ?? '',
+    categoryId: topic.categoryId,
+    tags: [],
+    posters: [],
+  }
+}
+
+function actionToTopic(action: LinuxDoUserAction): LinuxDoTopicSummary | undefined {
+  if (!action.topicId) return undefined
+  return {
+    id: action.topicId,
+    slug: action.slug || 'topic',
+    title: action.title || 'Linux.do 主题',
+    postsCount: 0,
+    replyCount: 0,
+    views: 0,
+    likeCount: 0,
+    createdAt: action.createdAt || '',
+    lastPostedAt: action.createdAt || '',
+    categoryId: action.categoryId,
+    tags: [],
+    posters: [],
+  }
+}
+
+function InlineStatus({
+  message,
+  actionLabel,
+  onAction,
+}: {
+  message: string
+  actionLabel?: string
+  onAction?: () => void
+}) {
+  return (
+    <div className="rounded-2xl border border-haze/70 bg-ink-raised/45 px-4 py-4 text-center">
+      <p className="text-[12px] leading-5 text-paper-muted">{message}</p>
+      {actionLabel && onAction ? (
+        <button
+          type="button"
+          onClick={onAction}
+          className="linuxdo-control mt-3 inline-flex min-h-9 items-center gap-1.5 rounded-full border border-haze px-3.5 py-1.5 text-[11px] font-medium text-paper-muted transition-colors hover:border-cinnabar/35 hover:text-paper"
+        >
+          <RefreshCcw size={12} />
+          {actionLabel}
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
+function getBadgeIcon(badge: LinuxDoUserBadge) {
+  const iconName = badge.icon?.toLowerCase().replace(/^fa-/, '') || ''
+  const slug = badge.slug?.toLowerCase() || ''
+  const name = badge.name.toLowerCase()
+
+  if (name.includes('欢迎') || slug.includes('welcome')) {
+    return Sparkles
+  }
+  if (name.includes('话题') || slug.includes('topic')) {
+    return ThumbsUp
+  }
+  if (iconName.includes('shield') || slug.includes('trust_level') || slug.includes('leader') || name.includes('信任') || name.includes('领袖') || name.includes('基本用户') || name.includes('活跃用户') || name.includes('成员')) {
+    return ShieldCheck
+  }
+  if (iconName.includes('trophy') || slug.includes('champion') || name.includes('海纳百川') || name.includes('冠军') || name.includes('百日')) {
+    return Trophy
+  }
+  if (iconName.includes('medal') || name.includes('宣导') || name.includes('文化')) {
+    return Medal
+  }
+  if (iconName.includes('flame') || iconName.includes('fire') || slug.includes('streak') || slug.includes('enthusiast') || name.includes('百尺竿头') || name.includes('连续') || name.includes('爱好者')) {
+    return Flame
+  }
+  if (iconName.includes('handshake') || slug.includes('thank') || name.includes('谢') || name.includes('感谢')) {
+    return HeartHandshake
+  }
+  if (iconName.includes('heart') || slug.includes('like') || name.includes('赞') || name.includes('爱心')) {
+    return Heart
+  }
+  if (iconName.includes('quote') || slug.includes('quote') || name.includes('引用')) {
+    return MessageSquareQuote
+  }
+  if (iconName.includes('link') || slug.includes('link') || name.includes('链接')) {
+    return Link2
+  }
+  if (iconName.includes('thumbs') || slug.includes('praise')) {
+    return ThumbsUp
+  }
+  if (iconName.includes('pen') || iconName.includes('edit') || slug.includes('editor') || slug.includes('author') || name.includes('编辑') || name.includes('自传') || name.includes('作者')) {
+    return PenTool
+  }
+  if (iconName.includes('book') || slug.includes('read') || name.includes('阅读') || name.includes('读者') || name.includes('读')) {
+    return BookOpen
+  }
+  if (iconName.includes('calendar') || slug.includes('anniversary') || name.includes('周年') || name.includes('纪念')) {
+    return CalendarDays
+  }
+  if (iconName.includes('check') || slug.includes('solved') || name.includes('解答') || name.includes('解决')) {
+    return CheckCircle2
+  }
+  if (iconName.includes('star') || slug.includes('star')) {
+    return Star
+  }
+  if (iconName.includes('bolt') || iconName.includes('zap')) {
+    return Zap
+  }
+  if (iconName.includes('user') || slug.includes('user') || name.includes('用户')) {
+    return UserCheck
+  }
+  if (badge.badgeTypeId === 1) return Trophy
+  if (badge.badgeTypeId === 2) return Medal
+  return Award
+}
+
+function getBadgeTierMeta(badgeTypeId?: number) {
+  switch (badgeTypeId) {
+    case 1: // Gold
+      return {
+        label: '金牌',
+        tierText: 'text-amber-700 dark:text-amber-400 font-semibold',
+        cardBorder: 'border-haze/60 hover:border-amber-400/40',
+        cardBg: 'bg-ink-raised/60 dark:bg-ink-raised/45',
+        ambientGlow: 'from-amber-400/[0.07] via-amber-400/[0.015] to-transparent',
+        tokenRing: 'ring-1.5 ring-amber-400/80 dark:ring-amber-400/60 shadow-[0_3px_12px_rgba(245,158,11,0.22)]',
+        tokenBg: 'bg-gradient-to-b from-amber-100 via-amber-200 to-amber-300 dark:from-amber-700/70 dark:via-amber-800/80 dark:to-amber-950',
+        tokenIcon: 'text-amber-900 dark:text-amber-100',
+        badgePill: 'bg-amber-500/10 text-amber-800 dark:text-amber-300 border border-amber-500/20',
+      }
+    case 2: // Silver
+      return {
+        label: '银牌',
+        tierText: 'text-slate-700 dark:text-slate-300 font-semibold',
+        cardBorder: 'border-haze/60 hover:border-slate-300/50',
+        cardBg: 'bg-ink-raised/60 dark:bg-ink-raised/45',
+        ambientGlow: 'from-slate-300/[0.08] via-slate-300/[0.015] to-transparent',
+        tokenRing: 'ring-1.5 ring-slate-300/90 dark:ring-slate-400/60 shadow-[0_3px_10px_rgba(148,163,184,0.2)]',
+        tokenBg: 'bg-gradient-to-b from-slate-100 via-slate-200 to-slate-300 dark:from-slate-600/70 dark:via-slate-700/80 dark:to-slate-800',
+        tokenIcon: 'text-slate-800 dark:text-slate-100',
+        badgePill: 'bg-slate-400/10 text-slate-700 dark:text-slate-300 border border-slate-400/20',
+      }
+    case 3: // Bronze
+      return {
+        label: '铜牌',
+        tierText: 'text-amber-900 dark:text-amber-400 font-semibold',
+        cardBorder: 'border-haze/60 hover:border-amber-700/35',
+        cardBg: 'bg-ink-raised/60 dark:bg-ink-raised/45',
+        ambientGlow: 'from-amber-600/[0.07] via-amber-600/[0.015] to-transparent',
+        tokenRing: 'ring-1.5 ring-amber-700/50 dark:ring-amber-600/60 shadow-[0_3px_10px_rgba(180,83,9,0.2)]',
+        tokenBg: 'bg-gradient-to-b from-amber-100 via-orange-100 to-amber-200 dark:from-amber-800/70 dark:via-orange-900/80 dark:to-stone-900',
+        tokenIcon: 'text-amber-950 dark:text-amber-100',
+        badgePill: 'bg-amber-600/10 text-amber-900 dark:text-amber-300 border border-amber-600/20',
+      }
+    default:
+      return {
+        label: '徽章',
+        tierText: 'text-paper-muted',
+        cardBorder: 'border-haze/60 hover:border-haze/90',
+        cardBg: 'bg-ink-raised/60 dark:bg-ink-raised/45',
+        ambientGlow: 'from-paper/[0.02] to-transparent',
+        tokenRing: 'ring-1.5 ring-paper/20 shadow-xs',
+        tokenBg: 'bg-gradient-to-br from-paper/10 to-paper/20',
+        tokenIcon: 'text-paper',
+        badgePill: 'bg-paper/10 text-paper-muted border border-paper/15',
+      }
+  }
+}
+
+function ProfileSkeleton() {
+  return (
+    <div className="page-x py-4" role="status" aria-label="正在加载用户资料">
+      <div className="rounded-[22px] border border-haze/60 bg-ink-raised/40 p-4">
+        <div className="flex items-center gap-3">
+          <div className="linuxdo-skeleton h-14 w-14 rounded-full" />
+          <div className="flex-1">
+            <div className="linuxdo-skeleton h-4 w-28 rounded" />
+            <div className="linuxdo-skeleton mt-2 h-3 w-20 rounded" />
+          </div>
+        </div>
+        <div className="linuxdo-skeleton mt-4 h-3 w-[90%] rounded" />
+        <div className="linuxdo-skeleton mt-2 h-3 w-[72%] rounded" />
+        <div className="mt-4 grid grid-cols-4 gap-2">
+          {Array.from({ length: 4 }, (_, index) => <div key={index} className="linuxdo-skeleton h-14 rounded-xl" />)}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function SummaryTopicCard({
+  topic,
+  category,
+  onOpen,
+}: {
+  topic: LinuxDoUserSummaryTopic
+  category?: LinuxDoCategory
+  onOpen: () => void
+}) {
+  const glyph = category ? tagGlyph(category.name) : ''
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="linuxdo-control group flex w-full items-start gap-3 rounded-2xl border border-haze/55 bg-ink-raised/35 px-3.5 py-3 text-left transition-all hover:border-cinnabar/25 hover:bg-ink-raised/55 active:scale-[0.995]"
+    >
+      <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-paper/[0.045] text-cinnabar-soft">
+        <FileText size={14} />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="line-clamp-2 block text-[13px] font-semibold leading-[1.42] text-paper">{topic.title}</span>
+        <span className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[9.5px] text-paper-faint">
+          {category ? <span>{glyph ? glyph + ' ' : ''}{category.name}</span> : null}
+          {topic.likeCount !== undefined ? <span className="inline-flex items-center gap-1"><Heart size={10} />{topic.likeCount}</span> : null}
+          {topic.createdAt ? <span>{ago(topic.createdAt)}</span> : null}
+        </span>
+      </span>
+      <ChevronRight size={14} className="mt-2 shrink-0 text-paper-faint transition-transform group-hover:translate-x-0.5" />
+    </button>
+  )
+}
+
+function SummaryReplyCard({
+  reply,
+  onOpen,
+}: {
+  reply: LinuxDoUserSummaryReply
+  onOpen: () => void
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="linuxdo-control group flex w-full items-start gap-3 rounded-2xl border border-haze/55 bg-ink-raised/35 px-3.5 py-3 text-left transition-all hover:border-cinnabar/25 hover:bg-ink-raised/55 active:scale-[0.995]"
+    >
+      <span className="mt-0.5 grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-paper/[0.045] text-paper-muted">
+        <MessageCircle size={14} />
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="line-clamp-2 block text-[13px] font-semibold leading-[1.42] text-paper">{reply.topic.title}</span>
+        <span className="mt-1.5 flex items-center gap-2 text-[9.5px] text-paper-faint">
+          <span>#{reply.postNumber}</span>
+          {reply.likeCount !== undefined ? <span className="inline-flex items-center gap-1"><Heart size={10} />{reply.likeCount}</span> : null}
+          {reply.createdAt ? <span>{ago(reply.createdAt)}</span> : null}
+        </span>
+      </span>
+      <ChevronRight size={14} className="mt-2 shrink-0 text-paper-faint transition-transform group-hover:translate-x-0.5" />
+    </button>
+  )
+}
+
+function ActivityCard({
+  action,
+  category,
+  tab,
+  onOpen,
+  onOpenUser,
+}: {
+  action: LinuxDoUserAction
+  category?: LinuxDoCategory
+  tab: ActivityTab
+  onOpen?: () => void
+  onOpenUser: (username: string) => void
+}) {
+  const actorDriven = tab === 'likes' || tab === 'responses' || (tab === 'activity' && (action.actionType === 1 || action.actionType === 6))
+  const actor = actorDriven ? (action.actingUsername || action.username) : action.username
+  const actorAvatar = actorDriven ? (action.actingAvatarTemplate || action.avatarTemplate) : action.avatarTemplate
+  const isActorAdmin = isLinuxDoSiteAdmin(actor)
+  const semantic = tab === 'activity'
+    ? action.actionType === 1
+      ? (action.username && action.username !== actor ? '赞了 @' + action.username + ' 的帖子' : '赞了这个帖子')
+      : action.actionType === 4
+        ? '发布话题'
+        : action.actionType === 5
+          ? '回复'
+          : action.actionType === 6
+            ? '收到回应'
+            : '社区动态'
+    : tab === 'likes'
+      ? (action.username && action.username !== actor ? '赞了 @' + action.username + ' 的帖子' : '赞了这个帖子')
+      : tab === 'responses'
+        ? '回应了这位用户'
+        : tab === 'replies'
+          ? '回复'
+          : '发布话题'
+
+  return (
+    <article className="rounded-2xl border border-haze/55 bg-ink-raised/35 px-3.5 py-3 shadow-[0_1px_3px_rgba(0,0,0,0.025)]">
+      <div className="flex items-start gap-2.5">
+        <div className="relative shrink-0">
+          <button
+            type="button"
+            disabled={!actor}
+            onClick={() => actor && onOpenUser(actor)}
+            className={`linuxdo-control grid h-8 w-8 shrink-0 place-items-center overflow-hidden border border-haze bg-paper/5 disabled:pointer-events-none transition-transform active:scale-95 ${
+              isActorAdmin ? 'rounded-[7px]' : 'rounded-full'
+            }`}
+          >
+            {avatar(actorAvatar, actor)}
+          </button>
+          {isActorAdmin && (
+            <span
+              data-linuxdo-site-admin-badge
+              title="站长"
+              className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[#0088ff] text-white shadow-xs ring-1.5 ring-ink-raised pointer-events-none"
+              aria-label="站长角标"
+            >
+              <BatteryLow size={9} strokeWidth={2.5} className="shrink-0" aria-hidden="true" />
+            </span>
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+            {actor ? (
+              <button
+                type="button"
+                onClick={() => onOpenUser(actor)}
+                className={`linuxdo-control max-w-full truncate text-[11.5px] hover:text-cinnabar-soft inline-flex items-center gap-1 ${
+                  isActorAdmin ? 'font-bold text-[#0088ff] dark:text-[#38a3ff]' : 'font-semibold text-paper'
+                }`}
+              >
+                <span>@{actor}</span>
+                {isActorAdmin && (
+                  <Shield size={11} className="shrink-0 fill-[#0088ff] text-[#0088ff] dark:fill-[#38a3ff] dark:text-[#38a3ff]" aria-label="站长认证" />
+                )}
+              </button>
+            ) : null}
+            <span className="text-[9.5px] text-paper-faint">{semantic}</span>
+          </div>
+          {action.createdAt ? <div className="mt-0.5 text-[9px] text-paper-faint">{ago(action.createdAt)}</div> : null}
+        </div>
+        {onOpen ? (
+          <button
+            type="button"
+            onClick={onOpen}
+            aria-label="打开帖子"
+            className="linuxdo-control grid h-8 w-8 shrink-0 place-items-center rounded-full text-paper-faint transition-colors hover:bg-paper/5 hover:text-paper"
+          >
+            <ChevronRight size={15} />
+          </button>
+        ) : null}
+      </div>
+      {action.title ? (
+        <button
+          type="button"
+          disabled={!onOpen}
+          onClick={onOpen}
+          className="linuxdo-control mt-2.5 block w-full text-left disabled:pointer-events-none"
+        >
+          <span className="line-clamp-2 text-[13.5px] font-semibold leading-[1.45] text-paper">{action.title}</span>
+        </button>
+      ) : null}
+      {action.excerpt ? (
+        <div
+          className="linuxdo-post-prose reader-prose mt-2 line-clamp-4 select-text text-[11.5px] leading-[1.65] text-paper-muted"
+          dangerouslySetInnerHTML={{ __html: action.excerpt }}
+        />
+      ) : null}
+      <div className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[9.5px] text-paper-faint">
+        {category ? <span>{tagGlyph(category.name) ? tagGlyph(category.name) + ' ' : ''}{category.name}</span> : null}
+        {action.postNumber ? <span>#{action.postNumber}</span> : null}
+        {(tab === 'responses' || (tab === 'activity' && action.actionType === 6)) && action.targetUsername ? <span>回应 @{action.targetUsername}</span> : null}
+      </div>
+    </article>
+  )
+}
+
+function BoostCard({
+  item,
+  onOpen,
+  onOpenUser,
+}: {
+  item: LinuxDoBoostListItem
+  onOpen?: () => void
+  onOpenUser: (username: string) => void
+}) {
+  const who = item.user?.username || item.post?.username
+  const whoAvatar = item.user?.avatarTemplate || item.post?.avatarTemplate
+  const isWhoAdmin = isLinuxDoSiteAdmin(who)
+  return (
+    <article className="rounded-2xl border border-haze/55 bg-ink-raised/35 px-3.5 py-3">
+      <div className="flex items-center gap-2.5">
+        {who ? (
+          <div className="relative shrink-0">
+            <button
+              type="button"
+              onClick={() => onOpenUser(who)}
+              className={`linuxdo-control grid h-8 w-8 shrink-0 place-items-center overflow-hidden border border-haze bg-paper/5 transition-transform active:scale-95 ${
+                isWhoAdmin ? 'rounded-[7px]' : 'rounded-full'
+              }`}
+            >
+              {avatar(whoAvatar, who)}
+            </button>
+            {isWhoAdmin && (
+              <span
+                data-linuxdo-site-admin-badge
+                title="站长"
+                className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-[#0088ff] text-white shadow-xs ring-1.5 ring-ink-raised pointer-events-none"
+                aria-label="站长角标"
+              >
+                <BatteryLow size={9} strokeWidth={2.5} className="shrink-0" aria-hidden="true" />
+              </span>
+            )}
+          </div>
+        ) : (
+          <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-paper/5 text-cinnabar-soft"><Rocket size={13} /></span>
+        )}
+        <div className="min-w-0 flex-1">
+          {item.post?.topicTitle ? (
+            <button
+              type="button"
+              disabled={!onOpen}
+              onClick={onOpen}
+              className="linuxdo-control line-clamp-2 text-left text-[12.5px] font-semibold text-paper disabled:pointer-events-none"
+            >
+              {item.post.topicTitle}
+            </button>
+          ) : <div className="text-[12px] font-medium text-paper">Boost</div>}
+          <div className="mt-0.5 text-[9px] text-paper-faint flex items-center gap-1">
+            <span className={isWhoAdmin ? 'font-bold text-[#0088ff] dark:text-[#38a3ff]' : ''}>
+              {who ? '@' + who : 'Linux.do'}
+            </span>
+            {isWhoAdmin && (
+              <Shield size={10} className="shrink-0 fill-[#0088ff] text-[#0088ff] dark:fill-[#38a3ff] dark:text-[#38a3ff]" aria-label="站长认证" />
+            )}
+            {item.createdAt ? <span> · {ago(item.createdAt)}</span> : null}
+          </div>
+        </div>
+        {onOpen ? <button type="button" onClick={onOpen} className="linuxdo-control grid h-8 w-8 place-items-center rounded-full text-paper-faint"><ChevronRight size={14} /></button> : null}
+      </div>
+      {item.raw ? <div className="mt-2.5 select-text text-[12px] leading-[1.65] text-paper-muted">{item.raw}</div> : null}
+      {item.post?.excerpt ? <div className="mt-2 line-clamp-3 select-text text-[10.5px] leading-5 text-paper-faint">{item.post.excerpt}</div> : null}
+    </article>
+  )
+}
+
+export function UserProfileView({
+  username,
+  initialTab = 'overview',
+  initialBadgeId,
+  onOpenTopic,
+  onOpenUser,
+  session = { authenticated: false, authMode: 'none' },
+  onResumeDraft,
+  onVerify,
+  accountControls,
+}: {
+  username: string
+  initialTab?: UserProfileTab
+  initialBadgeId?: number
+  onOpenTopic: (topic: LinuxDoTopicSummary, targetPostNumber?: number) => void
+  onOpenUser: (username: string) => void
+  session?: LinuxDoSessionSnapshot
+  onResumeDraft?: (draft: LinuxDoProfileDraft) => Promise<void>
+  onVerify?: LinuxDoVerify
+  accountControls?: UserProfileAccountControls
+}) {
+  const [profile, setProfile] = useState<LinuxDoUserProfile | null>(null)
+  const [summary, setSummary] = useState<LinuxDoUserSummary | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [profileError, setProfileError] = useState('')
+  const [showAccountSettings, setShowAccountSettings] = useState(false)
+  const [loggingOut, setLoggingOut] = useState(false)
+  const [showLogoutConfirm, setShowLogoutConfirm] = useState(false)
+  const [challenge, setChallenge] = useState<{
+    error: unknown
+    scope: 'header' | 'activity' | 'boosts' | 'badges'
+    tab?: ActivityTab
+    append?: boolean
+  } | null>(null)
+  const captureChallenge = useCallback((error: unknown, scope: 'header' | 'activity' | 'boosts' | 'badges', tab?: ActivityTab, append?: boolean) => {
+    if (isLinuxDoVerificationError(error)) setChallenge({ error, scope, tab, append })
+  }, [])
+  const [summaryError, setSummaryError] = useState('')
+  const [activeTab, setActiveTab] = useState<UserProfileTab>(initialTab)
+  const [activities, setActivities] = useState<Partial<Record<ActivityTab, ActivityCacheEntry>>>({})
+  const [boostMode, setBoostMode] = useState<BoostMode>('received')
+  const [boostsReceived, setBoostsReceived] = useState<LinuxDoBoostListItem[]>([])
+  const [boostsGiven, setBoostsGiven] = useState<LinuxDoBoostListItem[]>([])
+  const [boostReceivedLoaded, setBoostReceivedLoaded] = useState(false)
+  const [boostGivenLoaded, setBoostGivenLoaded] = useState(false)
+  const [boostLoading, setBoostLoading] = useState(false)
+  const [boostReceivedError, setBoostReceivedError] = useState('')
+  const [boostGivenError, setBoostGivenError] = useState('')
+  const [badges, setBadges] = useState<LinuxDoUserSummary['badges']>([])
+  const [badgesLoaded, setBadgesLoaded] = useState(false)
+  const [badgesLoading, setBadgesLoading] = useState(false)
+  const [badgesError, setBadgesError] = useState('')
+  const [badgeViewMode, setBadgeViewMode] = useState<'grid' | 'list'>('grid')
+  const [categoriesById, setCategoriesById] = useState<Record<number, LinuxDoCategory>>({})
+  const generationRef = useRef(0)
+  const targetBadgeRef = useRef<HTMLElement | null>(null)
+  const viewingSelf = (session.authenticated && session.currentUser?.username.toLowerCase() === username.toLowerCase()) || Boolean(accountControls)
+  const visibleTabs = profileTabs.filter(tab =>
+    (!['read', 'drafts', 'pending', 'bookmarks'].includes(tab.id) || viewingSelf)
+    && (tab.id !== 'assigned' || (session.authenticated && session.currentUser?.canAssignGlobally !== false)),
+  )
+  const sectionTab = (['read', 'drafts', 'pending', 'assigned', 'votes', 'solved', 'reactions'] as UserProfileTab[]).includes(activeTab) ? activeTab as LinuxDoProfileSection : undefined
+
+  const loadHeader = useCallback(() => {
+    const generation = ++generationRef.current
+    const controller = new AbortController()
+    setLoading(true)
+    setProfile(null)
+    setSummary(null)
+    setProfileError('')
+    setSummaryError('')
+    setChallenge(null)
+    setActiveTab(initialTab)
+    setActivities({})
+    setBoostsReceived([])
+    setBoostsGiven([])
+    setBoostReceivedLoaded(false)
+    setBoostGivenLoaded(false)
+    setBoostReceivedError('')
+    setBoostGivenError('')
+    setBadges([])
+    setBadgesLoaded(false)
+    setBadgesLoading(false)
+    setBadgesError('')
+
+    const profileRequest = peopleApi.profile(username, { signal: controller.signal }).then((next) => {
+      if (generation === generationRef.current) setProfile(next)
+    }).catch((error) => {
+      if (generation !== generationRef.current) return
+      if (!(error instanceof DOMException && error.name === 'AbortError')) { setProfileError(readableError(error)); captureChallenge(error, 'header') }
+    })
+    const summaryRequest = peopleApi.summary(username, { signal: controller.signal }).then((next) => {
+      if (generation === generationRef.current) setSummary(next)
+    }).catch((error) => {
+      if (generation !== generationRef.current) return
+      if (!(error instanceof DOMException && error.name === 'AbortError')) { setSummaryError(readableError(error)); captureChallenge(error, 'header') }
+    })
+
+    void Promise.allSettled([profileRequest, summaryRequest]).finally(() => {
+      if (generation === generationRef.current) setLoading(false)
+    })
+
+    return () => controller.abort()
+  }, [captureChallenge, initialTab, username])
+
+  useEffect(() => loadHeader(), [loadHeader])
+
+  useEffect(() => {
+    if (!summary?.topCategories.length) return
+    setCategoriesById((previous) => ({
+      ...previous,
+      ...Object.fromEntries(summary.topCategories.map((category) => [category.id, {
+        id: category.id,
+        name: category.name,
+        slug: category.slug,
+        color: category.color,
+        textColor: category.textColor,
+        topicCount: category.topicCount,
+      }])),
+    }))
+  }, [summary])
+
+  const ensureCategories = useCallback(() => {
+    if (Object.keys(categoriesById).length > 8) return
+    void discovery.categories().then((categories) => {
+      setCategoriesById((previous) => ({ ...previous, ...Object.fromEntries(categories.map((category) => [category.id, category])) }))
+    }).catch(() => undefined)
+  }, [categoriesById])
+
+  const loadActivity = useCallback(async (tab: ActivityTab, append = false) => {
+    const current = activities[tab] ?? emptyActivity()
+    if ((append && !current.nextOffset) || current.loading || current.loadingMore) return
+    const generation = generationRef.current
+    const offset = append ? current.nextOffset ?? 0 : 0
+    setActivities((previous) => ({
+      ...previous,
+      [tab]: {
+        ...(previous[tab] ?? emptyActivity()),
+        loading: !append,
+        loadingMore: append,
+        error: '',
+      },
+    }))
+    ensureCategories()
+    try {
+      const result: LinuxDoUserActivity = await peopleApi.activity(username, { offset, filter: activityFilter[tab] })
+      if (generation !== generationRef.current) return
+      setActivities((previous) => {
+        const old = previous[tab] ?? emptyActivity()
+        const incoming = result.actions.filter((item) => !append || !old.items.some((existing) => existing.postId === item.postId && existing.actionType === item.actionType && existing.createdAt === item.createdAt))
+        return {
+          ...previous,
+          [tab]: {
+            items: append ? old.items.concat(incoming) : incoming,
+            nextOffset: result.nextOffset,
+            hasMore: result.hasMore,
+            loaded: true,
+            loading: false,
+            loadingMore: false,
+            error: '',
+          },
+        }
+      })
+    } catch (error) {
+      if (generation !== generationRef.current) return
+      captureChallenge(error, 'activity', tab, append)
+      setActivities((previous) => ({
+        ...previous,
+        [tab]: {
+          ...(previous[tab] ?? emptyActivity()),
+          loaded: true,
+          loading: false,
+          loadingMore: false,
+          error: readableError(error),
+        },
+      }))
+    }
+  }, [activities, captureChallenge, ensureCategories, username])
+
+  const loadBoosts = useCallback(async (force = false) => {
+    if (boostLoading || (!force && boostReceivedLoaded && boostGivenLoaded)) return
+    const generation = generationRef.current
+    setBoostLoading(true)
+    setBoostReceivedError('')
+    setBoostGivenError('')
+    const [received, given] = await Promise.allSettled([
+      peopleApi.boostsReceived(username),
+      peopleApi.boostsGiven(username),
+    ])
+    if (generation !== generationRef.current) return
+    if (received.status === 'fulfilled') {
+      setBoostsReceived(received.value)
+      setBoostReceivedLoaded(true)
+    } else {
+      setBoostReceivedError(readableError(received.reason))
+      captureChallenge(received.reason, 'boosts')
+      setBoostReceivedLoaded(true)
+    }
+    if (given.status === 'fulfilled') {
+      setBoostsGiven(given.value)
+      setBoostGivenLoaded(true)
+    } else {
+      setBoostGivenError(readableError(given.reason))
+      captureChallenge(given.reason, 'boosts')
+      setBoostGivenLoaded(true)
+    }
+    setBoostLoading(false)
+  }, [boostGivenLoaded, boostLoading, boostReceivedLoaded, captureChallenge, username])
+
+  const loadBadges = useCallback(async (force = false) => {
+    if (badgesLoading || (!force && badgesLoaded)) return
+    const generation = generationRef.current
+    setBadgesLoading(true)
+    setBadgesError('')
+    try {
+      const next = await peopleApi.badges(username)
+      if (generation !== generationRef.current) return
+      setBadges(next)
+      setBadgesLoaded(true)
+    } catch (error) {
+      if (generation !== generationRef.current) return
+      setBadgesError(readableError(error))
+      captureChallenge(error, 'badges')
+      setBadgesLoaded(true)
+    } finally {
+      if (generation === generationRef.current) setBadgesLoading(false)
+    }
+  }, [badgesLoaded, badgesLoading, captureChallenge, username])
+
+  useEffect(() => {
+    if (activeTab === 'activity' || activeTab === 'topics' || activeTab === 'replies' || activeTab === 'likes' || activeTab === 'responses') {
+      const state = activities[activeTab]
+      if (!state?.loaded && !state?.loading) void loadActivity(activeTab)
+    } else if (activeTab === 'boosts' && !boostReceivedLoaded && !boostGivenLoaded) {
+      void loadBoosts()
+    } else if (activeTab === 'badges' && !badgesLoaded) {
+      void loadBadges()
+    }
+  }, [activeTab, activities, badgesLoaded, boostGivenLoaded, boostReceivedLoaded, loadActivity, loadBadges, loadBoosts])
+
+  const summaryCategories = useMemo(() => summary?.topCategories ?? [], [summary])
+  const visibleBadges = useMemo(() => {
+    const merged = new Map<number, LinuxDoUserSummary['badges'][number]>()
+    for (const badge of summary?.badges ?? []) merged.set(badge.badgeId ?? badge.id, badge)
+    for (const badge of badges) {
+      const key = badge.badgeId ?? badge.id
+      merged.set(key, { ...merged.get(key), ...badge })
+    }
+    return Array.from(merged.values())
+  }, [badges, summary])
+
+  useEffect(() => {
+    if (activeTab !== 'badges' || !initialBadgeId || !badgesLoaded) return
+    const frame = window.requestAnimationFrame(() => {
+      targetBadgeRef.current?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [activeTab, badgesLoaded, initialBadgeId, visibleBadges])
+
+  const openSummaryReply = (reply: LinuxDoUserSummaryReply) => {
+    onOpenTopic(summaryToTopic(reply.topic), reply.postNumber)
+  }
+
+  const openAction = (action: LinuxDoUserAction) => {
+    const topic = actionToTopic(action)
+    if (!topic) return
+    onOpenTopic(topic, action.postNumber)
+  }
+
+  const openBoostPost = (item: LinuxDoBoostListItem) => {
+    const post = item.post
+    if (!post?.topicId) return
+    let slug = 'topic'
+    let postNumber: number | undefined
+    if (post.url) {
+      try {
+        const parsed = new URL(post.url, 'https://linux.do')
+        const match = parsed.pathname.match(/^\/t\/([^/]+)\/(\d+)(?:\/(\d+))?/)
+        if (match) {
+          slug = match[1] || slug
+          postNumber = match[3] ? Number(match[3]) : undefined
+        }
+      } catch {
+        // Fall back to topic id/title from the plugin payload.
+      }
+    }
+    onOpenTopic({
+      id: post.topicId,
+      slug,
+      title: post.topicTitle || 'Linux.do 主题',
+      postsCount: 0,
+      replyCount: 0,
+      views: 0,
+      likeCount: 0,
+      createdAt: item.createdAt || '',
+      lastPostedAt: item.createdAt || '',
+      tags: [],
+      posters: [],
+    }, postNumber)
+  }
+
+  const retryChallenge = () => {
+    const pending = challenge
+    if (!pending) return
+    setChallenge(null)
+    if (pending.scope === 'header') { loadHeader(); return }
+    if (pending.scope === 'activity' && pending.tab) { void loadActivity(pending.tab, pending.append); return }
+    if (pending.scope === 'boosts') { void loadBoosts(true); return }
+    if (pending.scope === 'badges') void loadBadges(true)
+  }
+
+  if (loading && !profile) return <ProfileSkeleton />
+
+  if (!profile) {
+    return (
+      <div className="page-x py-16">
+        {challenge ? (
+          <LinuxDoRequestError variant="empty" error={challenge.error} onVerify={onVerify} onRetry={retryChallenge} />
+        ) : (
+          <InlineStatus message={profileError || '用户资料暂时无法加载'} actionLabel="重新加载" onAction={() => loadHeader()} />
+        )}
+      </div>
+    )
+  }
+
+  const currentActivity = activeTab === 'activity' || activeTab === 'topics' || activeTab === 'replies' || activeTab === 'likes' || activeTab === 'responses'
+    ? activities[activeTab] ?? emptyActivity()
+    : null
+  const currentBoosts = boostMode === 'received' ? boostsReceived : boostsGiven
+  const currentBoostLoaded = boostMode === 'received' ? boostReceivedLoaded : boostGivenLoaded
+  const currentBoostError = boostMode === 'received' ? boostReceivedError : boostGivenError
+
+  const isSiteAdmin = isLinuxDoSiteAdmin(profile.username)
+
+  return (
+    <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain page-x pb-5 pt-3">
+      {challenge ? <LinuxDoRequestError error={challenge.error} onVerify={onVerify} onRetry={retryChallenge} /> : null}
+      {/* 极客数字工坊主控制台 (Integrated Cyber Terminal Console) */}
+      <section className="linuxdo-terminal-canvas linuxdo-terminal-grid overflow-hidden rounded-[26px] p-4.5 sm:p-5.5">
+        <div className="flex items-start gap-3.5 sm:gap-4">
+          <div className="relative shrink-0">
+            <div className={`relative grid h-15 w-15 shrink-0 place-items-center overflow-hidden border border-haze bg-paper/5 ring-2 ring-paper/[0.04] sm:h-17 sm:w-17 ${
+              isSiteAdmin ? 'rounded-[16px]' : 'rounded-full'
+            }`}>
+              {avatar(profile.avatarTemplate, profile.username)}
+            </div>
+            {isSiteAdmin && (
+              <span
+                data-linuxdo-site-admin-badge
+                title="站长"
+                className="absolute -bottom-1 -right-1 flex h-5 w-5 sm:h-6 sm:w-6 items-center justify-center rounded-full bg-[#0088ff] text-white shadow-sm ring-2 ring-ink-raised pointer-events-none"
+                aria-label="站长角标"
+              >
+                <BatteryLow size={12} strokeWidth={2.5} className="shrink-0 sm:hidden" aria-hidden="true" />
+                <BatteryLow size={14} strokeWidth={2.5} className="hidden shrink-0 sm:block" aria-hidden="true" />
+              </span>
+            )}
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-1.5 sm:gap-2">
+                <h2 className={`truncate text-[19px] sm:text-[21px] font-bold tracking-tight inline-flex items-center gap-1.5 ${
+                  isSiteAdmin ? 'text-[#0088ff] dark:text-[#38a3ff]' : 'text-paper'
+                }`}>
+                  <span className="truncate">{profile.name || profile.username}</span>
+                  {isSiteAdmin && (
+                    <Shield size={16} className="shrink-0 fill-[#0088ff] text-[#0088ff] dark:fill-[#38a3ff] dark:text-[#38a3ff]" aria-label="站长认证" />
+                  )}
+                </h2>
+                {profile.trustLevel !== undefined ? (
+                  <button
+                    type="button"
+                    disabled={!accountControls?.onTrustLevel}
+                    onClick={() => accountControls?.onTrustLevel?.()}
+                    className={'shrink-0 rounded-full border border-[#20c36b]/35 bg-[#20c36b]/10 px-2 py-0.5 font-mono text-[9px] font-semibold text-[#20c36b] transition-all ' + (accountControls?.onTrustLevel ? 'hover:bg-[#20c36b]/20 active:scale-95 cursor-pointer shadow-xs' : '')}
+                    title={accountControls?.onTrustLevel ? '点击查看信任等级详情与达成要求' : undefined}
+                  >
+                    TL{profile.trustLevel}
+                  </button>
+                ) : null}
+                {profile.title ? (
+                  <span className="hidden truncate rounded-md border border-paper/10 bg-paper/[0.04] px-1.5 py-0.5 text-[9.5px] font-medium text-paper-muted sm:inline-block">{profile.title}</span>
+                ) : null}
+              </div>
+              {accountControls ? (
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setShowAccountSettings(prev => !prev)}
+                    aria-label="账号与安全设置"
+                    className={'linuxdo-control grid h-8 w-8 shrink-0 place-items-center rounded-xl border transition-all ' + (showAccountSettings ? 'bg-cinnabar/15 border-cinnabar/40 text-cinnabar shadow-xs' : 'border-haze text-paper-muted hover:bg-paper/5 hover:text-paper active:scale-95')}
+                  >
+                    <Settings size={15} />
+                  </button>
+                </div>
+              ) : null}
+            </div>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <span className="font-mono text-[11.5px] font-medium text-paper-muted">@{profile.username}</span>
+              {profile.title ? (
+                <span className="truncate rounded-md border border-paper/10 bg-paper/[0.04] px-1.5 py-0.5 text-[9.5px] font-medium text-paper-muted sm:hidden">{profile.title}</span>
+              ) : null}
+              {accountControls ? (
+                <button
+                  type="button"
+                  onClick={() => setShowAccountSettings(prev => !prev)}
+                  className="linuxdo-control inline-flex items-center gap-1 rounded-full border border-cinnabar/25 bg-cinnabar/10 px-2 py-0.5 text-[9px] font-semibold text-cinnabar transition-all hover:bg-cinnabar/15 active:scale-95"
+                >
+                  <ShieldCheck size={11} />
+                  <span>第一方安全会话</span>
+                </button>
+              ) : null}
+            </div>
+            <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[9.5px] text-paper-faint">
+              {profile.createdAt ? <span>加入于 {dateLabel(profile.createdAt)}</span> : null}
+              {profile.lastSeenAt ? <span>最近活跃 {ago(profile.lastSeenAt)}</span> : null}
+              {profile.location ? <span>{profile.location}</span> : null}
+            </div>
+          </div>
+        </div>
+
+        {profile.bioCooked ? (
+          <div className="linuxdo-post-prose reader-prose mt-3.5 rounded-2xl border-l-2 border-cinnabar/50 bg-paper/[0.025] p-3 select-text text-[12px] leading-[1.7] text-paper-muted" dangerouslySetInnerHTML={{ __html: profile.bioCooked }} />
+        ) : null}
+
+        {/* 核心高光三联看板 (The Highlight Triad) */}
+        <div className="mt-4 grid grid-cols-3 gap-2">
+          <div className="linuxdo-metric-card rounded-2xl p-2.5 text-center">
+            <div className="flex items-center justify-center gap-1 text-[9.5px] font-medium text-paper-faint mb-0.5">
+              <Clock3 size={11} className="text-paper-muted" />
+              <span>阅读时长</span>
+            </div>
+            <div className="font-mono text-[16px] sm:text-[18px] font-bold tracking-tight text-paper">
+              {duration(summary?.timeRead)}
+            </div>
+          </div>
+
+          <div className="linuxdo-metric-card rounded-2xl p-2.5 text-center">
+            <div className="flex items-center justify-center gap-1 text-[9.5px] font-medium text-cinnabar-soft mb-0.5">
+              <Heart size={11} className="text-cinnabar" />
+              <span>社区获赞</span>
+            </div>
+            <div className="font-mono text-[16px] sm:text-[18px] font-bold tracking-tight text-paper">
+              {metric(summary?.likesReceived)}
+            </div>
+          </div>
+
+          <div className="linuxdo-metric-card rounded-2xl p-2.5 text-center">
+            <div className="flex items-center justify-center gap-1 text-[9.5px] font-medium text-paper-faint mb-0.5">
+              <FileText size={11} className="text-paper-muted" />
+              <span>原创主题</span>
+            </div>
+            <div className="font-mono text-[16px] sm:text-[18px] font-bold tracking-tight text-paper">
+              {metric(summary?.topicCount)}
+            </div>
+          </div>
+        </div>
+
+        {/* 精密次级刻度阵列 (Secondary Precision Telemetry) */}
+        <div className="mt-2 grid grid-cols-4 gap-1.5">
+          <div className="linuxdo-metric-card rounded-xl py-2 px-1 text-center">
+            <span className="block truncate text-[8.5px] text-paper-faint">浏览主题</span>
+            <span className="mt-0.5 block truncate font-mono text-[12px] font-semibold text-paper-muted">{metric(summary?.topicsEntered)}</span>
+          </div>
+          <div className="linuxdo-metric-card rounded-xl py-2 px-1 text-center">
+            <span className="block truncate text-[8.5px] text-paper-faint">阅读帖子</span>
+            <span className="mt-0.5 block truncate font-mono text-[12px] font-semibold text-paper-muted">{metric(summary?.postsReadCount)}</span>
+          </div>
+          <div className="linuxdo-metric-card rounded-xl py-2 px-1 text-center">
+            <span className="block truncate text-[8.5px] text-paper-faint">访问天数</span>
+            <span className="mt-0.5 block truncate font-mono text-[12px] font-semibold text-paper-muted">{metric(summary?.daysVisited)}</span>
+          </div>
+          <div className="linuxdo-metric-card rounded-xl py-2 px-1 text-center">
+            <span className="block truncate text-[8.5px] text-paper-faint">送出赞</span>
+            <span className="mt-0.5 block truncate font-mono text-[12px] font-semibold text-paper-muted">{metric(summary?.likesGiven)}</span>
+          </div>
+        </div>
+
+        {/* TL 信任进阶脉冲条 (Trust Level Pulse Micro-Track) */}
+        {profile.trustLevel !== undefined ? (
+          <button
+            type="button"
+            disabled={!accountControls?.onTrustLevel}
+            onClick={() => accountControls?.onTrustLevel?.()}
+            className={'linuxdo-control group mt-3 flex w-full items-center justify-between gap-3 rounded-2xl border border-[#20c36b]/30 bg-[#20c36b]/[0.06] p-3 text-left transition-all hover:bg-[#20c36b]/[0.1] active:scale-[0.985] ' + (accountControls?.onTrustLevel ? 'cursor-pointer' : 'cursor-default')}
+          >
+            <div className="flex items-center gap-2.5 min-w-0">
+              <span className="grid h-8 w-8 shrink-0 place-items-center rounded-xl bg-[#20c36b]/15 text-[#20c36b] transition-transform group-hover:scale-105">
+                <BadgeCheck size={18} />
+              </span>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[12px] font-bold text-paper">信任等级 TL{profile.trustLevel}</span>
+                  <span className="rounded-full bg-[#20c36b]/20 px-2 py-0.2 font-mono text-[8.5px] font-semibold text-[#20c36b]">进阶通道</span>
+                </div>
+                <p className="truncate text-[9.5px] text-paper-faint">查看升级指标、防降级诊断与特权达成要求</p>
+              </div>
+            </div>
+            <ChevronRight size={14} className="shrink-0 text-[#20c36b]/70 transition-transform group-hover:translate-x-0.5" />
+          </button>
+        ) : null}
+      </section>
+
+      {/* 快捷功能按键岛 (Quick Action Island) - 仅在账号中心模式呈现 */}
+      {accountControls ? (
+        <section className="mt-3 space-y-2">
+          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+            <button
+              type="button"
+              aria-label="打开个人私信"
+              onClick={accountControls.onPrivateMessages}
+              className="linuxdo-control linuxdo-key-card group flex items-center gap-2.5 rounded-2xl p-3 text-left transition-all active:scale-[0.98]"
+            >
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-cinnabar/10 text-cinnabar transition-transform group-hover:scale-105">
+                <Mail size={17} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[11.5px] font-bold text-paper">个人私信</span>
+                <span className="mt-0.5 block truncate text-[9px] text-paper-faint">收发与互动</span>
+              </span>
+              <ChevronRight size={13} className="shrink-0 text-paper-faint transition-transform group-hover:translate-x-0.5" />
+            </button>
+
+            <button
+              type="button"
+              onClick={accountControls.onTrustLevel}
+              className="linuxdo-control linuxdo-key-card group flex items-center gap-2.5 rounded-2xl border-[#20c36b]/25 bg-[#20c36b]/[0.05] p-3 text-left transition-all hover:border-[#20c36b]/40 hover:bg-[#20c36b]/[0.09] active:scale-[0.98]"
+            >
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-[#20c36b]/15 text-[#20c36b] transition-transform group-hover:scale-105">
+                <BadgeCheck size={17} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-1 truncate text-[11.5px] font-bold text-paper">
+                  <span>信任等级</span>
+                  {profile.trustLevel !== undefined ? (
+                    <span className="font-mono text-[8.5px] text-[#20c36b]">TL{profile.trustLevel}</span>
+                  ) : null}
+                </span>
+                <span className="mt-0.5 block truncate text-[9px] text-paper-faint">升级要求与进度</span>
+              </span>
+              <ChevronRight size={13} className="shrink-0 text-paper-faint transition-transform group-hover:translate-x-0.5" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                if (visibleTabs.some(t => t.id === 'bookmarks')) {
+                  setActiveTab('bookmarks')
+                } else {
+                  accountControls.onBookmarks?.()
+                }
+              }}
+              className="linuxdo-control linuxdo-key-card group flex items-center gap-2.5 rounded-2xl p-3 text-left transition-all hover:border-[#f5b326]/30 active:scale-[0.98]"
+            >
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-[#f5b326]/12 text-[#f5b326] transition-transform group-hover:scale-105">
+                <Bookmark size={17} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate text-[11.5px] font-bold text-paper">我的书签</span>
+                <span className="mt-0.5 block truncate text-[9px] text-paper-faint">楼层与主题</span>
+              </span>
+              <ChevronRight size={13} className="shrink-0 text-paper-faint transition-transform group-hover:translate-x-0.5" />
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('drafts')}
+              className="linuxdo-control linuxdo-key-card group flex items-center gap-2.5 rounded-2xl p-3 text-left transition-all hover:border-[#7b61ff]/30 active:scale-[0.98]"
+            >
+              <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-[#7b61ff]/12 text-[#7b61ff] transition-transform group-hover:scale-105">
+                <FileText size={17} />
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="flex items-center gap-1 truncate text-[11.5px] font-bold text-paper">
+                  <span>我的草稿</span>
+                  {profile.draftCount ? (
+                    <span className="rounded-full bg-[#7b61ff]/20 px-1.5 py-0.2 font-mono text-[8.5px] font-semibold text-[#7b61ff]">
+                      {profile.draftCount}
+                    </span>
+                  ) : null}
+                </span>
+                <span className="mt-0.5 block truncate text-[9px] text-paper-faint">
+                  {profile.draftCount ? profile.draftCount + ' 篇待续' : '继续编辑'}
+                </span>
+              </span>
+              <ChevronRight size={13} className="shrink-0 text-paper-faint transition-transform group-hover:translate-x-0.5" />
+            </button>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-haze/40 bg-ink-raised/35 px-3 py-2 text-[9.5px] text-paper-faint">
+            <span className="inline-flex items-center gap-1.5">
+              <History size={12} className="text-[#20c36b]" />
+              <span>媒体与附件：{accountControls.capabilities?.uploads ? '原生上传与图片预览已启用' : '不可用'}</span>
+            </span>
+            {accountControls.capabilities?.boost && !accountControls.capabilities.boost.available ? (
+              <span className="inline-flex items-center gap-1 text-paper-muted">
+                <Rocket size={11} className="text-paper-faint" />
+                <span>{accountControls.capabilities.boost.reason || 'Boost 权益受限'}</span>
+              </span>
+            ) : null}
+          </div>
+        </section>
+      ) : null}
+
+      {/* 账号与安全运维控制台 (Security & Session Deck) */}
+      {accountControls ? (
+        <section className="mt-3 overflow-hidden rounded-[22px] border border-haze/60 bg-ink-raised/50 p-3.5 sm:p-4 shadow-sm">
+          <div className="flex items-start gap-3">
+            <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-cinnabar/10 text-cinnabar">
+              <ShieldCheck size={18} />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2">
+                <span className="text-[12px] font-bold text-paper">第一方安全会话</span>
+                <span className="rounded-full bg-[#20c36b]/15 px-2 py-0.2 font-mono text-[8.5px] font-semibold text-[#20c36b]">设备本地</span>
+              </div>
+              <p className="mt-0.5 text-[10px] leading-relaxed text-paper-faint">
+                当前会话只保存在设备的 Linux.do 第一方会话中。密码与人机验证全程在官方页面完成，NewsNook 本地零明文存储。
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-3 flex flex-wrap items-center gap-2 border-t border-haze/40 pt-2.5">
+            <button
+              type="button"
+              onClick={() => void accountControls.onVerifyBrowser?.()}
+              className="linuxdo-control inline-flex min-h-8 items-center gap-1.5 rounded-xl border border-haze/60 bg-paper/[0.03] px-3 py-1 text-[10.5px] font-medium text-paper-muted transition-colors hover:border-cinnabar/30 hover:text-paper active:scale-95"
+            >
+              <KeyRound size={12} className="text-paper-faint" />
+              <span>打开 Linux.do 登录页面</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => void accountControls.onClearBrowserSession?.()}
+              className="linuxdo-control inline-flex min-h-8 items-center gap-1.5 rounded-xl border border-haze/60 bg-paper/[0.03] px-3 py-1 text-[10.5px] font-medium text-paper-muted transition-colors hover:border-cinnabar/30 hover:text-paper active:scale-95"
+            >
+              <RefreshCcw size={12} className="text-paper-faint" />
+              <span>清除验证数据</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setShowLogoutConfirm(true)}
+              className="linuxdo-control ml-auto inline-flex min-h-8 items-center gap-1.5 rounded-xl border border-cinnabar/25 bg-cinnabar/5 px-3 py-1 text-[10.5px] font-medium text-cinnabar transition-colors hover:bg-cinnabar/10 active:scale-95"
+            >
+              <LogOut size={12} />
+              <span>退出账号</span>
+            </button>
+          </div>
+
+          {showLogoutConfirm ? (
+            <div className="mt-2.5 rounded-xl border border-cinnabar/30 bg-cinnabar/10 p-2.5">
+              <p className="text-[10.5px] font-medium text-cinnabar">确认退出当前 Linux.do 账号？本设备的本地会话将被清除。</p>
+              <div className="mt-2 flex items-center justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowLogoutConfirm(false)}
+                  className="linuxdo-control rounded-lg border border-haze bg-ink-raised px-2.5 py-1 text-[10px] text-paper-muted"
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  disabled={loggingOut}
+                  onClick={async () => {
+                    setLoggingOut(true)
+                    try {
+                      await accountControls.onLogout?.()
+                    } finally {
+                      setLoggingOut(false)
+                      setShowLogoutConfirm(false)
+                    }
+                  }}
+                  className="linuxdo-control inline-flex items-center gap-1 rounded-lg bg-cinnabar px-3 py-1 text-[10px] font-semibold text-white disabled:opacity-50"
+                >
+                  {loggingOut ? <Loader2 size={10} className="animate-spin" /> : null}
+                  <span>确认退出</span>
+                </button>
+              </div>
+            </div>
+          ) : null}
+
+          {accountControls.accountError ? (
+            <button
+              type="button"
+              onClick={() => accountControls.onClearAccountError?.()}
+              className="mt-2.5 block w-full rounded-xl border border-cinnabar/25 bg-cinnabar/[0.08] p-2 text-left text-[10px] leading-relaxed text-cinnabar"
+            >
+              {accountControls.accountError} · 点击关闭
+            </button>
+          ) : null}
+        </section>
+      ) : null}
+
+      {loading && !summary && !summaryError ? <div className="mt-3 flex items-center justify-center gap-2 rounded-xl border border-haze/45 bg-paper/[0.025] px-3 py-2 text-[9.5px] text-paper-faint" role="status"><Loader2 size={12} className="animate-spin" />正在加载公开统计与摘要</div> : null}
+
+      {summaryError ? (
+        <div className="mt-3">
+          <InlineStatus
+            message={'公开统计加载失败：' + summaryError}
+            actionLabel="重试统计"
+            onAction={() => {
+              const generation = generationRef.current
+              setSummaryError('')
+              setLoading(true)
+              void peopleApi.summary(username).then((next) => {
+                if (generation === generationRef.current) setSummary(next)
+              }).catch((error) => {
+                if (generation === generationRef.current) setSummaryError(readableError(error))
+              }).finally(() => {
+                if (generation === generationRef.current) setLoading(false)
+              })
+            }}
+          />
+        </div>
+      ) : null}
+
+      <div className="sticky top-0 z-20 -mx-1 mt-3 border-y border-haze/45 bg-ink/95 px-1 py-2 backdrop-blur-xl">
+        <div role="tablist" aria-label="个人主页栏目" className="scrollbar-none flex gap-1 overflow-x-auto">
+          {visibleTabs.map((tab) => {
+            const Icon = tab.icon
+            const active = tab.id === activeTab
+            return (
+              <button
+                key={tab.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setActiveTab(tab.id)}
+                className={'linuxdo-control inline-flex min-h-10 shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-[10.5px] font-medium transition-all ' + (active ? 'bg-cinnabar text-white shadow-sm' : 'text-paper-muted hover:bg-paper/5 hover:text-paper')}
+              >
+                <Icon size={12.5} />
+                {tab.label}
+                {tab.id === 'drafts' && profile.draftCount !== undefined ? ' (' + profile.draftCount + ')' : tab.id === 'pending' && profile.pendingPostsCount !== undefined ? ' (' + profile.pendingPostsCount + ')' : ''}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      <section className="mt-3">
+        {sectionTab ? <ProfileSectionView key={sectionTab + ':' + username + ':' + (session.currentUser?.id ?? 'guest')} section={sectionTab} username={username} session={session} onVerify={onVerify} onOpenTopic={onOpenTopic} onResumeDraft={onResumeDraft} /> : activeTab === 'bookmarks' ? (viewingSelf ? <BookmarksView key={session.currentUser?.id} session={session} onOpenTopic={onOpenTopic} /> : <InlineStatus message="书签仅本人登录后可查看" />) : activeTab === 'overview' ? (
+          <div className="space-y-4">
+            <div>
+              <div className="mb-2 flex items-center justify-between">
+                <h3 className="text-[12px] font-semibold text-paper">高信号话题</h3>
+                <span className="text-[9px] text-paper-faint">{summary?.topics.length ?? 0} 条</span>
+              </div>
+              {summary?.topics.length ? (
+                <div className="grid gap-2 md:grid-cols-2">
+                  {summary.topics.slice(0, 6).map((topic) => <SummaryTopicCard key={topic.id} topic={topic} category={topic.categoryId ? categoriesById[topic.categoryId] : undefined} onOpen={() => onOpenTopic(summaryToTopic(topic))} />)}
+                </div>
+              ) : <InlineStatus message={summary ? '暂无公开的高信号话题' : '正在等待公开统计数据'} />}
+            </div>
+
+            {summary?.replies.length ? (
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <h3 className="text-[12px] font-semibold text-paper">高信号回复</h3>
+                  <span className="text-[9px] text-paper-faint">{summary.replies.length} 条</span>
+                </div>
+                <div className="grid gap-2 md:grid-cols-2">
+                  {summary.replies.slice(0, 6).map((reply) => <SummaryReplyCard key={reply.topic.id + ':' + reply.postNumber} reply={reply} onOpen={() => openSummaryReply(reply)} />)}
+                </div>
+              </div>
+            ) : null}
+
+            {summaryCategories.length ? (
+              <div>
+                <h3 className="mb-2 text-[12px] font-semibold text-paper">常驻领域</h3>
+                <div className="flex flex-wrap gap-2">
+                  {summaryCategories.slice(0, 8).map((category) => (
+                    <span key={category.id} className="inline-flex items-center gap-1.5 rounded-full border border-haze/60 bg-paper/[0.03] px-2.5 py-1.5 text-[10px] text-paper-muted">
+                      <span>{tagGlyph(category.name) || '•'}</span>
+                      <span>{category.name}</span>
+                      <span className="font-mono text-[9px] text-paper-faint">{metric(category.topicCount)}/{metric(category.postCount)}</span>
+                    </span>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+
+            {(summary?.mostRepliedToUsers.length || summary?.mostLikedUsers.length || summary?.mostLikedByUsers.length) ? (
+              <div>
+                <h3 className="mb-2 text-[12px] font-semibold text-paper">社区互动</h3>
+                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                  {[
+                    ['常回复', summary?.mostRepliedToUsers ?? []],
+                    ['常点赞', summary?.mostLikedUsers ?? []],
+                    ['常获赞于', summary?.mostLikedByUsers ?? []],
+                  ].map(([label, users]) => (
+                    <div key={String(label)} className="rounded-2xl border border-haze/55 bg-ink-raised/35 p-3">
+                      <div className="mb-2 text-[9px] font-semibold tracking-[0.08em] text-paper-faint">{String(label)}</div>
+                      <div className="space-y-1.5">
+                        {(users as NonNullable<LinuxDoUserSummary['mostLikedUsers']>).slice(0, 4).map((user) => (
+                          <button key={user.id} type="button" onClick={() => onOpenUser(user.username)} className="linuxdo-control flex w-full items-center gap-2 rounded-xl px-1.5 py-1.5 text-left hover:bg-paper/[0.035]">
+                            <span className={`grid h-7 w-7 shrink-0 place-items-center overflow-hidden bg-paper/5 ${
+                              isLinuxDoSiteAdmin(user.username) ? 'rounded-[5px]' : 'rounded-full'
+                            }`}>{avatar(user.avatarTemplate, user.username)}</span>
+                            <span className={`min-w-0 flex-1 truncate text-[10.5px] ${
+                              isLinuxDoSiteAdmin(user.username) ? 'font-bold text-[#0088ff] dark:text-[#38a3ff]' : 'font-medium text-paper'
+                            }`}>@{user.username}</span>
+                            <span className="font-mono text-[9px] text-paper-faint">{user.count}</span>
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+        ) : activeTab === 'activity' || activeTab === 'topics' || activeTab === 'replies' || activeTab === 'likes' || activeTab === 'responses' ? (
+          <div>
+            {currentActivity?.loading ? (
+              <div className="space-y-2" role="status" aria-label="正在加载用户活动">
+                {Array.from({ length: 4 }, (_, index) => <div key={index} className="linuxdo-skeleton h-28 rounded-2xl border border-haze/50" />)}
+              </div>
+            ) : currentActivity?.error && !currentActivity.items.length ? (
+              <InlineStatus message={currentActivity.error} actionLabel="重新加载" onAction={() => void loadActivity(activeTab)} />
+            ) : currentActivity?.items.length ? (
+              <div className="space-y-2">
+                {currentActivity.items.map((action, index) => (
+                  <div key={(action.postId ?? action.topicId ?? index) + ':' + action.actionType + ':' + (action.createdAt ?? index)} className="linuxdo-card-in" style={{ animationDelay: Math.min(index, 8) * 24 + 'ms' }}>
+                    <ActivityCard
+                      action={action}
+                      category={action.categoryId ? categoriesById[action.categoryId] : undefined}
+                      tab={activeTab}
+                      onOpen={action.topicId ? () => openAction(action) : undefined}
+                      onOpenUser={onOpenUser}
+                    />
+                  </div>
+                ))}
+                {currentActivity.error ? <InlineStatus message={currentActivity.error} actionLabel="重试" onAction={() => void loadActivity(activeTab, true)} /> : null}
+                {currentActivity.hasMore ? (
+                  <button
+                    type="button"
+                    disabled={currentActivity.loadingMore}
+                    onClick={() => void loadActivity(activeTab, true)}
+                    className="linuxdo-control flex min-h-10 w-full items-center justify-center gap-2 rounded-full border border-haze text-[10.5px] text-paper-muted disabled:opacity-50"
+                  >
+                    {currentActivity.loadingMore ? <Loader2 size={13} className="animate-spin" /> : null}
+                    {currentActivity.loadingMore ? '正在加载更多' : '加载更多'}
+                  </button>
+                ) : <div className="py-2 text-center text-[9px] text-paper-faint">已显示全部公开内容</div>}
+              </div>
+            ) : (
+              <InlineStatus message="这个分类暂时没有公开内容" actionLabel="刷新" onAction={() => void loadActivity(activeTab)} />
+            )}
+          </div>
+        ) : activeTab === 'boosts' ? (
+          <div>
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <div className="flex rounded-full border border-haze/60 bg-paper/[0.025] p-1">
+                {([
+                  ['received', '收到', boostReceivedLoaded ? boostsReceived.length : undefined],
+                  ['given', '发出', boostGivenLoaded ? boostsGiven.length : undefined],
+                ] as const).map(([id, label, count]) => (
+                  <button
+                    key={id}
+                    type="button"
+                    onClick={() => setBoostMode(id)}
+                    className={'linuxdo-control min-h-8 rounded-full px-3 py-1 text-[10px] font-medium transition-all ' + (boostMode === id ? 'bg-cinnabar text-white' : 'text-paper-muted')}
+                  >
+                    {label}{count !== undefined ? ' ' + count : ''}
+                  </button>
+                ))}
+              </div>
+              <button type="button" disabled={boostLoading} onClick={() => {
+                if (boostMode === 'received') setBoostReceivedLoaded(false)
+                else setBoostGivenLoaded(false)
+                void loadBoosts(true)
+              }} className="linuxdo-control grid h-9 w-9 place-items-center rounded-full border border-haze text-paper-faint disabled:opacity-50" aria-label="刷新 Boost">
+                <RefreshCcw size={13} className={boostLoading ? 'animate-spin' : ''} />
+              </button>
+            </div>
+            {boostLoading && !currentBoostLoaded ? (
+              <div className="flex items-center justify-center gap-2 py-16 text-[11px] text-paper-faint"><Loader2 size={15} className="animate-spin" />正在加载 Boost</div>
+            ) : currentBoostError && !currentBoosts.length ? (
+              <InlineStatus message={currentBoostError} actionLabel="重新加载" onAction={() => void loadBoosts(true)} />
+            ) : currentBoosts.length ? (
+              <div className="space-y-2">
+                {currentBoosts.map((item) => <BoostCard key={item.id} item={item} onOpen={item.post?.topicId ? () => openBoostPost(item) : undefined} onOpenUser={onOpenUser} />)}
+              </div>
+            ) : currentBoostLoaded ? (
+              <InlineStatus message={boostMode === 'received' ? '暂未收到公开 Boost' : '暂未发出公开 Boost'} />
+            ) : null}
+          </div>
+        ) : activeTab === 'badges' ? (
+          <div>
+            <div className="mb-3 flex items-center justify-between gap-2">
+              <div>
+                <h3 className="text-[12.5px] font-semibold text-paper">徽章</h3>
+                <p className="mt-0.5 text-[9px] text-paper-faint">
+                  {badgesLoaded ? visibleBadges.length + ' 枚公开徽章' : '正在读取公开徽章'}
+                  {profile.featuredUserBadgeIds.length ? ' · ' + profile.featuredUserBadgeIds.length + ' 枚设为展示' : ''}
+                </p>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <div className="flex items-center rounded-full border border-haze bg-ink-raised/40 p-0.5 text-paper-muted">
+                  <button
+                    type="button"
+                    onClick={() => setBadgeViewMode('grid')}
+                    className={`grid h-7 w-7 place-items-center rounded-full transition-colors ${
+                      badgeViewMode === 'grid' ? 'bg-paper/15 text-paper font-semibold shadow-xs' : 'text-paper-faint hover:text-paper'
+                    }`}
+                    aria-label="展柜网格视图"
+                    title="展柜网格"
+                  >
+                    <LayoutGrid size={13} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setBadgeViewMode('list')}
+                    className={`grid h-7 w-7 place-items-center rounded-full transition-colors ${
+                      badgeViewMode === 'list' ? 'bg-paper/15 text-paper font-semibold shadow-xs' : 'text-paper-faint hover:text-paper'
+                    }`}
+                    aria-label="清单列表视图"
+                    title="清单列表"
+                  >
+                    <List size={13} />
+                  </button>
+                </div>
+                <button
+                  type="button"
+                  disabled={badgesLoading}
+                  onClick={() => void loadBadges(true)}
+                  className="linuxdo-control grid h-8 w-8 shrink-0 place-items-center rounded-full border border-haze text-paper-faint disabled:opacity-50"
+                  aria-label="刷新徽章"
+                >
+                  <RefreshCcw size={12} className={badgesLoading ? 'animate-spin' : ''} />
+                </button>
+              </div>
+            </div>
+            {badgesLoading && !visibleBadges.length ? (
+              <div className="flex items-center justify-center gap-2 py-16 text-[11px] text-paper-faint"><Loader2 size={15} className="animate-spin" />正在加载徽章</div>
+            ) : visibleBadges.length ? (
+              <>
+                {badgesError ? <div className="mb-2"><InlineStatus message={'完整徽章列表加载失败，已显示摘要数据：' + badgesError} actionLabel="重试" onAction={() => void loadBadges(true)} /></div> : null}
+                {badgeViewMode === 'grid' ? (
+                  <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 md:grid-cols-4">
+                    {visibleBadges.map((badge) => {
+                      const featured = badge.favorite === true || profile.featuredUserBadgeIds.includes(badge.id) || (badge.badgeId ? profile.featuredUserBadgeIds.includes(badge.badgeId) : false)
+                      const notificationTarget = initialBadgeId !== undefined && (badge.badgeId === initialBadgeId || badge.id === initialBadgeId)
+                      const tierMeta = getBadgeTierMeta(badge.badgeTypeId)
+                      const IconComp = getBadgeIcon(badge)
+                      const cleanedDesc = cleanBadgeDescription(badge.description)
+                      return (
+                        <article
+                          key={(badge.badgeId ?? badge.id) + ':' + badge.id}
+                          ref={notificationTarget ? (node) => { targetBadgeRef.current = node } : undefined}
+                          className={
+                            'group relative flex flex-col items-center rounded-2xl border p-3.5 pt-3 pb-3 text-center transition-all duration-200 select-none shadow-xs hover:shadow-md active:scale-[0.985] overflow-hidden ' +
+                            (notificationTarget
+                              ? 'border-cinnabar/80 bg-cinnabar/[0.06] shadow-[0_4px_16px_rgba(224,46,36,0.18)]'
+                              : `${tierMeta.cardBorder} ${tierMeta.cardBg}`)
+                          }
+                        >
+                          {/* 顶部柔光氛围渐变 */}
+                          <div className={`pointer-events-none absolute inset-x-0 top-0 h-12 bg-gradient-to-b ${tierMeta.ambientGlow}`} />
+
+                          {/* 状态徽标 (右上角绝对定位，极简灵动，绝不喧宾夺主) */}
+                          {notificationTarget ? (
+                            <span className="absolute top-2.5 right-2.5 z-10 inline-flex items-center gap-0.5 rounded-full bg-cinnabar px-1.5 py-0.2 text-[8px] font-bold text-white shadow-xs">
+                              本次获得
+                            </span>
+                          ) : featured ? (
+                            <span className="absolute top-2.5 right-2.5 z-10 inline-flex items-center gap-0.5 rounded-full bg-amber-500/10 border border-amber-500/25 px-1.5 py-0.2 text-[8px] font-semibold text-amber-700 dark:text-amber-300 shadow-xs">
+                              <Sparkles size={8.5} className="shrink-0 text-amber-500" />
+                              展示中
+                            </span>
+                          ) : null}
+
+                          {/* 勋章实体徽盘 (The Medallion Token - 无论是否展示中，永远绽放所属金属阶梯光芒！) */}
+                          <div className="relative mt-1 mb-2">
+                            <div
+                              className={`relative grid h-12 w-12 place-items-center rounded-full transition-transform duration-200 group-hover:scale-108 group-hover:rotate-2 ${tierMeta.tokenRing} ${tierMeta.tokenBg}`}
+                            >
+                              {badge.imageUrl ? (
+                                <img src={badge.imageUrl} alt={badge.name} className="h-7 w-7 object-contain drop-shadow-xs" />
+                              ) : (
+                                <IconComp size={22} strokeWidth={1.9} className={`${tierMeta.tokenIcon} drop-shadow-xs`} />
+                              )}
+                            </div>
+
+                            {/* 多次获得气泡角标 */}
+                            {badge.count && badge.count > 1 ? (
+                              <span className="absolute -bottom-1 -right-1 z-10 flex h-4 min-w-4 items-center justify-center rounded-full bg-paper px-1 font-mono text-[8.5px] font-black text-ink shadow-sm ring-1 ring-black/10 tabular-nums">
+                                ×{badge.count}
+                              </span>
+                            ) : null}
+                          </div>
+
+                          {/* 徽章名称 */}
+                          <h4 className="w-full truncate text-[13px] font-bold tracking-tight text-paper px-1" title={badge.name}>
+                            {badge.name}
+                          </h4>
+
+                          {/* 纯净描述说明 (两行截断，统一最小高度使网格对齐稳定) */}
+                          <p className="mt-1 line-clamp-2 select-text text-[10.5px] leading-[1.4] text-paper-muted min-h-[29px] flex items-center justify-center px-1" title={cleanedDesc}>
+                            {cleanedDesc || '暂无描述'}
+                          </p>
+
+                          {/* 底部信息行：品质与日期合一，居中融合，无冗余重复！ */}
+                          <div className="mt-2 flex items-center justify-center gap-1.5 text-[9.5px]">
+                            <span className={`inline-flex items-center gap-1 rounded-full px-1.5 py-0.2 font-medium ${tierMeta.badgePill}`}>
+                              <span className="h-1.5 w-1.5 rounded-full bg-current opacity-70" />
+                              {tierMeta.label}
+                            </span>
+                            {badge.grantedAt ? (
+                              <span className="text-paper-faint tabular-nums">· {dateLabel(badge.grantedAt)}</span>
+                            ) : null}
+                          </div>
+                        </article>
+                      )
+                    })}
+                  </div>
+                ) : (
+                  <div className="space-y-2">
+                    {visibleBadges.map((badge) => {
+                      const featured = badge.favorite === true || profile.featuredUserBadgeIds.includes(badge.id) || (badge.badgeId ? profile.featuredUserBadgeIds.includes(badge.badgeId) : false)
+                      const notificationTarget = initialBadgeId !== undefined && (badge.badgeId === initialBadgeId || badge.id === initialBadgeId)
+                      const tierMeta = getBadgeTierMeta(badge.badgeTypeId)
+                      const IconComp = getBadgeIcon(badge)
+                      const cleanedDesc = cleanBadgeDescription(badge.description)
+                      return (
+                        <article
+                          key={(badge.badgeId ?? badge.id) + ':' + badge.id}
+                          ref={notificationTarget ? (node) => { targetBadgeRef.current = node } : undefined}
+                          className={
+                            'group relative flex items-center gap-3.5 rounded-2xl border p-3 transition-all duration-150 select-none shadow-xs hover:shadow-md ' +
+                            (notificationTarget
+                              ? 'border-cinnabar/80 bg-cinnabar/[0.06]'
+                              : `${tierMeta.cardBorder} ${tierMeta.cardBg}`)
+                          }
+                        >
+                          {/* 左侧勋章实体 */}
+                          <div className="relative shrink-0">
+                            <div
+                              className={`grid h-11 w-11 place-items-center rounded-full transition-transform duration-200 group-hover:scale-105 ${tierMeta.tokenRing} ${tierMeta.tokenBg}`}
+                            >
+                              {badge.imageUrl ? (
+                                <img src={badge.imageUrl} alt={badge.name} className="h-6 w-6 object-contain drop-shadow-xs" />
+                              ) : (
+                                <IconComp size={20} strokeWidth={1.9} className={`${tierMeta.tokenIcon} drop-shadow-xs`} />
+                              )}
+                            </div>
+                            {badge.count && badge.count > 1 ? (
+                              <span className="absolute -bottom-1 -right-1 z-10 flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-paper px-1 font-mono text-[8px] font-black text-ink shadow-xs ring-1 ring-black/10 tabular-nums">
+                                ×{badge.count}
+                              </span>
+                            ) : null}
+                          </div>
+
+                          {/* 右侧信息流 */}
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-1.5 min-w-0">
+                                <h4 className="truncate text-[13px] font-bold text-paper" title={badge.name}>
+                                  {badge.name}
+                                </h4>
+                                <span className={`shrink-0 rounded-md px-1.5 py-0.2 text-[8px] font-bold ${tierMeta.badgePill}`}>
+                                  {tierMeta.label}
+                                </span>
+                                {notificationTarget ? (
+                                  <span className="shrink-0 rounded-full bg-cinnabar px-1.5 py-0.2 text-[8px] font-bold text-white">
+                                    本次获得
+                                  </span>
+                                ) : featured ? (
+                                  <span className="shrink-0 inline-flex items-center gap-0.5 rounded-full bg-amber-500/10 border border-amber-500/25 px-1.5 py-0.2 text-[8px] font-semibold text-amber-700 dark:text-amber-300">
+                                    <Sparkles size={8} className="text-amber-500" />展示中
+                                  </span>
+                                ) : null}
+                              </div>
+                              {badge.grantedAt ? (
+                                <span className="shrink-0 text-[9px] text-paper-faint tabular-nums">
+                                  {dateLabel(badge.grantedAt)}
+                                </span>
+                              ) : null}
+                            </div>
+                            {cleanedDesc ? (
+                              <p className="mt-1 line-clamp-2 select-text text-[11px] leading-[1.45] text-paper-muted" title={cleanedDesc}>
+                                {cleanedDesc}
+                              </p>
+                            ) : null}
+                          </div>
+                        </article>
+                      )
+                    })}
+                  </div>
+                )}
+              </>
+            ) : badgesLoaded ? (
+              <InlineStatus message={badgesError || '该用户没有公开徽章'} actionLabel={badgesError ? '重新加载' : undefined} onAction={badgesError ? () => void loadBadges(true) : undefined} />
+            ) : summaryError ? (
+              <InlineStatus message={summaryError} actionLabel="重试" onAction={() => void loadBadges(true)} />
+            ) : null}
+          </div>
+        ) : null}
+      </section>
+    </div>
+  )
+}

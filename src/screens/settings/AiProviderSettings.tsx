@@ -131,7 +131,13 @@ export function AiProviderSettings({ prefs, onChange }: Props) {
       ...prefs.ai,
       providers: [
         ...prefs.ai.providers,
-        { id, name: `AI 提供商 ${prefs.ai.providers.length + 1}`, endpoint: '', apiKey: '' },
+        {
+          id,
+          name: `AI 提供商 ${prefs.ai.providers.length + 1}`,
+          endpoint: '',
+          apiKey: '',
+          capabilities: { tts: false },
+        },
       ],
     })
     setExpandedProviderId(id)
@@ -234,7 +240,7 @@ export function AiProviderSettings({ prefs, onChange }: Props) {
 
   return (
     <>
-      <SettingsSection title="AI 提供商">
+      <SettingsSection variant="plain" title="AI 提供商">
         <p className="page-x pb-3 font-mono text-[10px] leading-relaxed tracking-[0.08em] text-paper-faint">
           可添加多个 OpenAI 兼容接口。名称、Base URL 与 Key 属于提供商；具体 Model 由下方每项功能单独选择。
         </p>
@@ -319,6 +325,42 @@ export function AiProviderSettings({ prefs, onChange }: Props) {
                         </button>
                       }
                     />
+                    <label className="flex items-center justify-between gap-4 rounded-xl border border-haze bg-ink px-3.5 py-3">
+                      <span className="min-w-0">
+                        <span className="block text-[13px] text-paper">允许明文 HTTP API</span>
+                        <span className="mt-0.5 block text-[11px] leading-relaxed text-paper-faint">
+                          仅 Android 原生请求可用。密钥和内容未经加密，仅对可信的自建服务开启。
+                        </span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        aria-label="允许明文 HTTP API"
+                        checked={provider.allowInsecureHttp === true}
+                        onChange={(event) => updateProvider(provider.id, { allowInsecureHttp: event.target.checked })}
+                        className="h-4 w-4 shrink-0 accent-[var(--color-cinnabar)]"
+                      />
+                    </label>
+                    <label className="flex items-center justify-between gap-4 rounded-xl border border-haze bg-ink px-3.5 py-3">
+                      <span className="min-w-0">
+                        <span className="block text-[13px] text-paper">支持 AI TTS</span>
+                        <span className="mt-0.5 block font-mono text-[9.5px] leading-relaxed text-paper-faint">
+                          仅在该接口明确兼容 /audio/speech 时开启
+                        </span>
+                      </span>
+                      <input
+                        type="checkbox"
+                        checked={provider.capabilities.tts}
+                        onChange={(event) =>
+                          updateProvider(provider.id, {
+                            capabilities: {
+                              ...provider.capabilities,
+                              tts: event.target.checked,
+                            },
+                          })
+                        }
+                        className="h-4 w-4 shrink-0 accent-[var(--color-cinnabar)]"
+                      />
+                    </label>
                   </div>
                 )}
               </li>
@@ -337,7 +379,7 @@ export function AiProviderSettings({ prefs, onChange }: Props) {
         </div>
       </SettingsSection>
 
-      <SettingsSection title="功能模型">
+      <SettingsSection variant="plain" title="功能模型">
         <ul className="divide-y divide-haze border-y border-haze">
           {features.map((feature) => {
             const Icon = feature.icon

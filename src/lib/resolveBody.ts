@@ -2,16 +2,18 @@
  * 站内正文解析入口。实现按边界拆在 resolveBody/ 子模块：
  * - guards：反爬/付费墙识别、摘要 Feed 判定、软降级正文
  * - extractors：Readability 主路径与优设/公众号/OpenAI News 站点定制抽取
- * - siteBodies：虎嗅/网易/知乎/机器之心详情接口正文
+ * - siteBodies：虎嗅/网易/知乎/机器之心/新智元详情接口正文
  * - video：视频占位正文与媒体嗅探增量更新
  * 对外导入路径保持 `lib/resolveBody` 不变。
  */
 
 import { shouldUseOriginPlayerSurface } from '../features/mediaSniffer/originPlayerGate'
 import { discoverMediaDescriptor, mediaDescriptorHtml } from '../features/mediaSniffer/service'
+import { firstImageIn } from './articlePreview'
 import { appendRelatedCatalogHtml, extractRelatedCatalog } from '../features/catalogEngine/related'
 import { extractWebCatalogDetailMeta } from '../features/catalogEngine/detailMeta'
 import { normalizeCatalogTitle } from '../features/catalogEngine/normalize'
+import { catalogRequestOptions } from '../features/siteCatalog/requestIdentity'
 import { nnyyListingUrlForDetail } from '../features/frameworkDetect/adapters/nnyy'
 import { findSource, userAgentFor, type NewsSource } from '../sources/registry'
 import { cleanSummaryText } from './cleanSummary'
@@ -35,7 +37,11 @@ import {
   preferPublisherFetchUrl,
 } from './resolveBody/guards'
 import { extractWithReadability, isLikelyVideoPageUrl } from './resolveBody/extractors'
+import { isPreferredFeedBody, isPartialFeedTeaser } from './feedBodyEvidence'
+import { recoverFeedContent } from './resolveBody/feedContent'
+import { normalizeFeedLayout } from './resolveBody/feedLayout'
 import {
+  resolveAieraBody,
   resolveHuxiuVideoBody,
   resolveJiqizhixinBody,
   resolveNetEaseArticleBody,
@@ -51,6 +57,7 @@ import {
 } from './resolveBody/shared'
 import {
   applyMediaDescriptor,
+  buildTrustedEmbeddedVideoBody,
   buildVideoBody,
   scheduleMediaDiscovery,
   withVideoDiscoveryFailed,
@@ -73,7 +80,12 @@ export {
   extractWechatBodyHtml,
   isWechatArticleUrl,
 } from './resolveBody/extractors'
-export { buildHuxiuVideoBodyForTest, candidateNeteaseIds } from './resolveBody/siteBodies'
+export {
+  aieraPostIdForTest,
+  buildHuxiuVideoBodyForTest,
+  candidateNeteaseIds,
+  parseAieraRestPostForTest,
+} from './resolveBody/siteBodies'
 export { buildVideoBodyForTest } from './resolveBody/video'
 
 /** 正文抓取使用的 UA：优先自定义/额外源表，找不到则 undefined（走 http 默认 UA） */
@@ -81,8 +93,14 @@ export function pageUserAgentForArticle(
   article: Article,
   extraSources?: NewsSource[],
 ): string | undefined {
+  return pageRequestOptionsForArticle(article, extraSources).userAgent
+}
+
+function pageRequestOptionsForArticle(article: Article, extraSources?: NewsSource[]) {
   const source = findSource(article.sourceId, extraSources)
-  return source ? userAgentFor(source) : undefined
+  return source?.kind === 'web-catalog'
+    ? catalogRequestOptions(source.userAgent)
+    : { userAgent: source ? userAgentFor(source) : undefined }
 }
 
 function relatedExcludeUrls(source: NewsSource | undefined): string[] {
@@ -112,7 +130,7 @@ async function withRelatedFromPage(
     if (listingUrl) {
       const listingHtml = await fetchAbsoluteText(listingUrl, {
         signal,
-        userAgent: pageUserAgentForArticle(article, extraSources),
+        ...pageRequestOptionsForArticle(article, extraSources),
       }).catch(() => undefined)
       if (listingHtml) {
         items = extractRelatedCatalog(listingHtml, listingUrl, {
@@ -173,23 +191,29 @@ export async function resolveArticleBody(
   extraSources?: NewsSource[],
   onMediaResolved?: MediaResolvedHandler,
 ): Promise<ResolvedBody> {
-  if (
-    article.contentType !== 'video' &&
-    (isInlineFlashBody(article.contentHtml, article.sourceId) ||
-      (isSubstantialHtml(article.contentHtml) && !hasBrokenTextEncoding(article.contentHtml!)))
-  ) {
-    let contentHtml = await absolutizeHtml(
-      article.contentHtml!,
-      article.originUrl || 'https://local.invalid/',
-    )
-    const embeddedFrames = article.contentHtml!.match(/<iframe\b[^>]*>/gi) || []
+  // The list cache keeps a lightweight completeness signal, not full HTML.
+  // Rehydrate only complete/legacy generic feeds when their body is absent.
+  const source = findSource(article.sourceId, extraSources)
+  let feedArticle = article
+  if (source?.kind === 'feed' && article.contentType !== 'video' && !article.contentHtml) {
+    try {
+      feedArticle = await recoverFeedContent(article, source, signal)
+    } catch (error) {
+      if (signal?.aborted) throw error
+    }
+  }
+  const availableFeedHtml = feedArticle.contentHtml
+  const renderFeed = async (excerpt = false): Promise<ResolvedBody> => {
+    const baseUrl = article.originUrl || 'https://local.invalid/'
+    let contentHtml = await absolutizeHtml(normalizeFeedLayout(availableFeedHtml!), baseUrl)
+    const embeddedFrames = availableFeedHtml!.match(/<iframe\b[^>]*>/gi) || []
     const hasNonYoutubeEmbed = embeddedFrames.some(
       (frame) => !/youtube(?:-nocookie)?\.com\/embed\//i.test(frame),
     )
     if (hasNonYoutubeEmbed && article.originUrl) {
       const mediaOptions = {
         pageUrl: article.originUrl,
-        html: article.contentHtml,
+        html: availableFeedHtml,
         runtime: true,
         timeoutMs: 6000,
         signal,
@@ -197,7 +221,7 @@ export async function resolveArticleBody(
       if (onMediaResolved) {
         scheduleMediaDiscovery(
           mediaOptions,
-          { contentHtml, bodySource: 'feed' },
+          { contentHtml, bodySource: excerpt ? 'feed-excerpt' : 'feed' },
           article.title,
           article.image,
           (resolved) => onMediaResolved(withArticleAudio(resolved, article)),
@@ -205,7 +229,7 @@ export async function resolveArticleBody(
       } else {
         const descriptor = await discoverMediaDescriptor(mediaOptions).catch(() => null)
         const enriched = applyMediaDescriptor(
-          { contentHtml, bodySource: 'feed' },
+          { contentHtml, bodySource: excerpt ? 'feed-excerpt' : 'feed' },
           descriptor,
           article.title,
           article.image,
@@ -216,10 +240,24 @@ export async function resolveArticleBody(
     return withArticleAudio(
       {
         contentHtml,
-        bodySource: 'feed',
+        bodySource: excerpt ? 'feed-excerpt' : 'feed',
+        image: firstImageIn(availableFeedHtml!, article.originUrl),
       },
       article,
     )
+  }
+
+  if (
+    article.contentType !== 'video' && availableFeedHtml &&
+    !hasBrokenTextEncoding(availableFeedHtml) &&
+    feedArticle.feedBodyEvidence !== 'teaser' &&
+    !isPartialFeedTeaser(availableFeedHtml) &&
+    (isInlineFlashBody(availableFeedHtml, article.sourceId) ||
+      (source?.kind === 'feed'
+        ? isPreferredFeedBody(feedArticle.feedBodyEvidence)
+        : isSubstantialHtml(availableFeedHtml)))
+  ) {
+    return renderFeed()
   }
 
   // 新 RSS 视频稿带 contentType；旧列表缓存没有该字段，但正文同样很短。
@@ -229,15 +267,15 @@ export async function resolveArticleBody(
 
   if (article.contentType === 'video') {
     if (article.videoUrl) return buildVideoBody(article)
-    if (!article.originUrl) return buildVideoBody(article, 'failed')
 
-    // Android 自建源：原站可见表面 + 持续旁路，不走短时隐藏嗅探自动换 <video>
-    if (
-      shouldUseOriginPlayerSurface({
-        sourceId: article.sourceId,
-        contentType: article.contentType,
-      })
-    ) {
+    const useOriginSurface = shouldUseOriginPlayerSurface({
+      sourceId: article.sourceId,
+      contentType: article.contentType,
+    })
+
+    // Android 自建源：Reader 外层显示原站可见 WebView + 持续旁路嗅探。
+    // 正文只保留描述，避免再塞一个 iframe/占位播放器造成双播放器。
+    if (useOriginSurface) {
       const base: ResolvedBody = {
         contentHtml: sanitizeArticleHtml(
           (article.summary || article.title)
@@ -249,10 +287,11 @@ export async function resolveArticleBody(
         ),
         bodySource: 'video',
       }
+      if (!article.originUrl) return base
       if (onMediaResolved) {
         void fetchAbsoluteText(article.originUrl, {
           signal,
-          userAgent: pageUserAgentForArticle(article, extraSources),
+          ...pageRequestOptionsForArticle(article, extraSources),
         })
           .then(async (pageHtml) => {
             onMediaResolved(
@@ -271,7 +310,7 @@ export async function resolveArticleBody(
       }
       const pageHtml = await fetchAbsoluteText(article.originUrl, {
         signal,
-        userAgent: pageUserAgentForArticle(article, extraSources),
+        ...pageRequestOptionsForArticle(article, extraSources),
       }).catch(() => undefined)
       return await withRelatedFromPage(
         base,
@@ -283,11 +322,18 @@ export async function resolveArticleBody(
       )
     }
 
+    // Web 没有 Android 的跨域 WebView 网络观察器。Feed 已经给出官方播放器时，
+    // 直接使用受信 iframe，避免先请求 /api/page；上游反爬/网络失败也不应让播放器消失。
+    const embeddedBody = buildTrustedEmbeddedVideoBody(article)
+    if (embeddedBody) return embeddedBody
+
+    if (!article.originUrl) return buildVideoBody(article, 'failed')
+
     if (onMediaResolved) {
       const base = buildVideoBody(article)
       void fetchAbsoluteText(article.originUrl, {
         signal,
-        userAgent: pageUserAgentForArticle(article, extraSources),
+        ...pageRequestOptionsForArticle(article, extraSources),
       })
         .then(async (pageHtml) => {
           const withRelated = await withRelatedFromPage(
@@ -323,7 +369,7 @@ export async function resolveArticleBody(
 
     const pageHtml = await fetchAbsoluteText(article.originUrl, {
       signal,
-      userAgent: pageUserAgentForArticle(article, extraSources),
+      ...pageRequestOptionsForArticle(article, extraSources),
     }).catch(() => undefined)
     const descriptor = await discoverMediaDescriptor({
       pageUrl: article.originUrl,
@@ -373,6 +419,9 @@ export async function resolveArticleBody(
 
   const jiqizhixin = await resolveJiqizhixinBody(article, signal).catch(() => null)
   if (jiqizhixin) return jiqizhixin
+
+  const aiera = await resolveAieraBody(article, signal).catch(() => null)
+  if (aiera) return aiera
 
   if (!article.originUrl) {
     throw new Error('缺少原文地址，无法抽取正文')
@@ -426,11 +475,13 @@ export async function resolveArticleBody(
 
   const tried = new Set<string>()
   let lastError: unknown
-  const pageUa = pageUserAgentForArticle(article, extraSources)
+  const pageOptions = pageRequestOptionsForArticle(article, extraSources)
+  const pageUa = pageOptions.userAgent
 
   const tryExtract = async (pageUrl: string, userAgent = pageUa): Promise<ResolvedBody> => {
     const pageHtml = await fetchAbsoluteText(pageUrl, {
       signal,
+      ...pageOptions,
       userAgent,
     })
     if (!pageHtml.trim() || pageHtml.length < 200) {
@@ -536,7 +587,18 @@ export async function resolveArticleBody(
     }
   }
 
-  // NYT / WSJ / Reuters 等硬拦截：至少给出摘要 + 引导外开，避免只剩 HTTP 状态码
+  // When the publisher cannot be read, retain usable syndication content.
+  // Mark an unproven description as an excerpt rather than claiming it is full.
+  if (
+    availableFeedHtml &&
+    !hasBrokenTextEncoding(availableFeedHtml) && !isPartialFeedTeaser(availableFeedHtml) &&
+    (stripTags(availableFeedHtml).length >= 12 || /<(?:img|video|audio)\b/i.test(availableFeedHtml))
+  ) {
+    return renderFeed(true)
+  }
+
+  // Publisher extraction really failed and the syndication text is absent or
+  // an explicit teaser. Do not assert a paywall without a positive signal.
   if (resolvedOriginUrl || article.summary?.trim()) {
     return buildBlockedPublisherFallback(article, resolvedOriginUrl)
   }

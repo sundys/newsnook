@@ -1,0 +1,287 @@
+import { BatteryLow, Eye, Flame, Heart, MessageCircle, Shield } from 'lucide-react'
+import { useMemo, type CSSProperties, type KeyboardEvent } from 'react'
+
+import type { LinuxDoCategory, LinuxDoTopicSummary } from '../types'
+import { linuxDoTopicReadState } from '../topic/readState'
+import { linuxDoTitleParts } from '../content/title'
+import { ago, avatar, compact, isLinuxDoSiteAdmin, tagGlyph } from './utils'
+
+function getCategoryColor(category?: LinuxDoCategory): string {
+  if (!category?.color) return 'var(--color-cinnabar)'
+  return category.color.startsWith('#') ? category.color : `#${category.color}`
+}
+
+export function TopicCard({
+  topic,
+  onOpen,
+  onOpenUser,
+  category,
+  onOpenCategory,
+  onOpenTag,
+}: {
+  topic: LinuxDoTopicSummary
+  onOpen: () => void
+  onOpenUser?: (username: string) => void
+  category?: LinuxDoCategory
+  onOpenCategory?: (category: LinuxDoCategory) => void
+  onOpenTag?: (tag: string) => void
+}) {
+  const titleParts = useMemo(() => linuxDoTitleParts(topic.title, topic.fancyTitle), [topic.title, topic.fancyTitle])
+  const accessibleTitle = titleParts.map((part) => part.kind === 'emoji' ? part.alt : part.text).join('')
+  const author = topic.posters[0]
+  const last = topic.posters[topic.posters.length - 1]
+  const authorUsername = author?.username
+  const lastUsername = last?.username
+  const isSiteAdmin = isLinuxDoSiteAdmin(authorUsername)
+  const readState = linuxDoTopicReadState(topic)
+  const isUnread = readState !== 'read'
+  // Missing new/unread notifications do not prove that a topic was read.
+  const isRead = !isUnread && Number.isFinite(topic.lastReadPostNumber) && (topic.lastReadPostNumber ?? 0) > 0
+  const unreadLabel = readState === 'new'
+    ? '新主题'
+    : readState === 'unread'
+      ? `${Math.max(1, topic.unread ?? 0, topic.newPosts ?? 0)} 条未读`
+      : ''
+
+  const openFromKeyboard = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== 'Enter' && event.key !== ' ') return
+    event.preventDefault()
+    onOpen()
+  }
+
+  const catColor = category ? getCategoryColor(category) : undefined
+  const isHot = (topic.replyCount >= 30) || (topic.views >= 1000)
+
+  return (
+    <article
+      role="link"
+      tabIndex={0}
+      aria-label={'打开主题：' + accessibleTitle}
+      onClick={onOpen}
+      onKeyDown={openFromKeyboard}
+      className={
+        'linuxdo-control group relative w-full rounded-xl sm:rounded-2xl border border-haze/50 bg-ink-raised/85 p-3 sm:p-4 text-left transition-all duration-150 select-none active:scale-[0.988] shadow-[0_1px_3px_rgba(0,0,0,0.03)] ' +
+        (isRead
+          ? 'opacity-[0.92] hover:opacity-100'
+          : 'hover:border-cinnabar/30')
+      }
+    >
+      <div className="flex items-start gap-2.5 sm:gap-3">
+        {/* 头像 */}
+        <div className="relative mt-0.5 shrink-0">
+          <button
+            type="button"
+            disabled={!onOpenUser || !authorUsername}
+            onClick={(event) => {
+              if (authorUsername && onOpenUser) {
+                event.stopPropagation()
+                onOpenUser(authorUsername)
+              }
+            }}
+            aria-label={authorUsername ? `查看 ${authorUsername} 的个人主页` : '用户头像'}
+            className={
+              'group/avatar relative block cursor-pointer transition-transform active:scale-95 disabled:pointer-events-none disabled:cursor-default ' +
+              (isSiteAdmin ? 'rounded-[7px]' : 'rounded-full')
+            }
+          >
+            <div className={
+              isSiteAdmin
+                ? 'relative flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center overflow-hidden rounded-[7px] ring-1 ring-paper/10 bg-ink-deep shadow-2xs'
+                : 'relative flex h-8 w-8 sm:h-9 sm:w-9 shrink-0 items-center justify-center overflow-hidden rounded-full ring-1 ring-paper/10 bg-ink-deep shadow-2xs'
+            }>
+              {avatar(author?.avatarTemplate, authorUsername)}
+            </div>
+            {isSiteAdmin && (
+              <span
+                data-linuxdo-site-admin-badge
+                title="站长"
+                className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 sm:h-4 sm:w-4 items-center justify-center rounded-full bg-[#0088ff] text-white shadow-xs ring-1.5 ring-ink-raised pointer-events-none"
+                aria-label="站长角标"
+              >
+                <BatteryLow size={9} strokeWidth={2.5} className="shrink-0 sm:hidden" aria-hidden="true" />
+                <BatteryLow size={10} strokeWidth={2.5} className="hidden shrink-0 sm:block" aria-hidden="true" />
+              </span>
+            )}
+          </button>
+        </div>
+
+        {/* 主体内容 */}
+        <div className="min-w-0 flex-1">
+          {/* 顶栏信息：作者、时间、热度微标 */}
+          <div className="mb-1 flex items-center justify-between gap-2 text-[11px] leading-tight">
+            <div className="flex min-w-0 items-center gap-1.5">
+              {authorUsername && onOpenUser ? (
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onOpenUser(authorUsername)
+                  }}
+                  className={`linuxdo-control truncate flex items-center gap-1 transition-colors hover:underline ${
+                    isSiteAdmin
+                      ? 'font-bold text-[#0088ff] dark:text-[#38a3ff]'
+                      : 'font-semibold text-paper/90 hover:text-paper'
+                  }`}
+                >
+                  <span>{authorUsername}</span>
+                  {isSiteAdmin && (
+                    <Shield size={12} className="shrink-0 fill-[#0088ff] text-[#0088ff] dark:fill-[#38a3ff] dark:text-[#38a3ff]" aria-label="站长认证" />
+                  )}
+                </button>
+              ) : (
+                <span className={`truncate flex items-center gap-1 transition-colors ${
+                  isSiteAdmin
+                    ? 'font-bold text-[#0088ff] dark:text-[#38a3ff]'
+                    : 'font-semibold text-paper/90 group-hover:text-paper'
+                }`}>
+                  <span>{authorUsername || 'Linux.do'}</span>
+                  {isSiteAdmin && (
+                    <Shield size={12} className="shrink-0 fill-[#0088ff] text-[#0088ff] dark:fill-[#38a3ff] dark:text-[#38a3ff]" aria-label="站长认证" />
+                  )}
+                </span>
+              )}
+              {isHot ? (
+                <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-cinnabar/12 border border-cinnabar/25 px-1.5 py-0.2 font-mono text-[9px] font-bold text-cinnabar">
+                  <Flame size={9.5} className="fill-cinnabar text-cinnabar" />
+                  <span>HOT</span>
+                </span>
+              ) : null}
+            </div>
+            <span className="shrink-0 text-[10.5px] tabular-nums text-paper-faint">
+              {topic.lastPostedAt ? ago(topic.lastPostedAt) : ''}
+            </span>
+          </div>
+
+          {/* 标题 */}
+          <div className="flex items-start gap-1.5">
+            <h3 className={
+              'line-clamp-2 flex-1 text-[15px] sm:text-[16px] font-semibold leading-[1.38] tracking-[-0.015em] transition-colors ' +
+              (isRead ? 'text-paper-muted/85 group-hover:text-paper' : 'text-paper group-hover:text-cinnabar-soft')
+            }>
+              {titleParts.map((part, index) => part.kind === 'emoji' ? (
+                <img
+                  key={index}
+                  src={part.src}
+                  alt={part.alt}
+                  loading="lazy"
+                  decoding="async"
+                  className="mx-[0.04em] inline-block h-[1.15em] w-[1.15em] align-[-0.18em] object-contain"
+                />
+              ) : <span key={index}>{part.text}</span>)}
+            </h3>
+            {isUnread ? (
+              <span
+                className="mt-1.5 size-2 shrink-0 rounded-full bg-sky-400 shadow-[0_0_8px_rgba(56,189,248,0.7)] ring-2 ring-sky-400/20"
+                role="status"
+                aria-label={unreadLabel}
+                title={unreadLabel}
+              />
+            ) : null}
+          </div>
+
+          {/* 分类与标签 */}
+          {(category || topic.tags.length > 0) ? (
+            <div className="mt-2 flex flex-wrap items-center gap-1.5">
+              {category ? (
+                <button
+                  type="button"
+                  disabled={!onOpenCategory}
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onOpenCategory?.(category)
+                  }}
+                  style={{
+                    backgroundColor: catColor ? `color-mix(in srgb, ${catColor} 12%, transparent)` : 'color-mix(in srgb, var(--color-paper) 6%, transparent)',
+                    color: catColor || 'var(--color-paper)',
+                    borderColor: catColor ? `color-mix(in srgb, ${catColor} 25%, transparent)` : 'transparent',
+                  } as CSSProperties}
+                  className="linuxdo-control group/cat inline-flex items-center gap-1.5 rounded-lg border px-2 py-0.5 text-[10.5px] font-semibold transition-all active:scale-95 disabled:pointer-events-none"
+                >
+                  <span className="font-mono text-[9.5px] font-bold opacity-90">
+                    {category.slug === 'develop' ? '</>' : '■'}
+                  </span>
+                  <span>{category.name}</span>
+                </button>
+              ) : null}
+
+              {topic.tags.slice(0, 3).map((tag) => {
+                const glyph = tagGlyph(tag)
+                return (
+                  <button
+                    key={tag}
+                    type="button"
+                    disabled={!onOpenTag}
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      onOpenTag?.(tag)
+                    }}
+                    className="linuxdo-control inline-flex items-center gap-1 rounded-md border border-paper/[0.06] bg-paper/[0.03] px-2 py-0.5 text-[10.5px] font-medium text-paper-muted/90 transition-all hover:border-cinnabar/30 hover:bg-paper/[0.07] hover:text-paper active:scale-95 disabled:pointer-events-none"
+                  >
+                    {glyph ? (
+                      <span className="text-[9.5px] leading-none">{glyph}</span>
+                    ) : (
+                      <span className="font-mono text-[9px] text-paper-faint">#</span>
+                    )}
+                    <span>{tag}</span>
+                  </button>
+                )
+              })}
+            </div>
+          ) : null}
+
+          {/* 底部信息：最后回复与互动数据 */}
+          <div className="mt-2.5 flex items-center justify-between gap-2 text-[10.5px] text-paper-faint">
+            <span className="min-w-0 truncate text-[10px] sm:text-[10.5px]">
+              {lastUsername ? (
+                onOpenUser ? (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation()
+                      onOpenUser(lastUsername)
+                    }}
+                    className="linuxdo-control hover:underline hover:text-paper transition-colors"
+                  >
+                    最后回复 @{lastUsername}
+                  </button>
+                ) : (
+                  `最后回复 @${lastUsername}`
+                )
+              ) : authorUsername && onOpenUser ? (
+                <button
+                  type="button"
+                  onClick={(event) => {
+                    event.stopPropagation()
+                    onOpenUser(authorUsername)
+                  }}
+                  className="linuxdo-control hover:underline hover:text-paper transition-colors"
+                >
+                  {authorUsername}
+                </button>
+              ) : (
+                authorUsername || 'Linux.do'
+              )}
+            </span>
+
+            <span className="flex shrink-0 items-center gap-2.5 sm:gap-3 font-mono tabular-nums">
+              <span className="inline-flex items-center gap-1 font-medium text-paper-muted group-hover:text-paper transition-colors">
+                <MessageCircle size={11.5} className="text-paper-faint" />
+                <span>{compact(topic.replyCount)}</span>
+              </span>
+              <span className="inline-flex items-center gap-1 text-paper-faint">
+                <Eye size={11} className="opacity-70" />
+                <span>{compact(topic.views)}</span>
+              </span>
+              {topic.likeCount > 0 ? (
+                <span className="inline-flex items-center gap-1 font-medium text-rose-400/90">
+                  <Heart size={10.5} className="fill-rose-400/20 text-rose-400" />
+                  <span>{compact(topic.likeCount)}</span>
+                </span>
+              ) : null}
+            </span>
+          </div>
+        </div>
+      </div>
+    </article>
+  )
+}

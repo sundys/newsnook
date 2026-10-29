@@ -151,8 +151,8 @@ export function CategoryEditScreen({
           </div>
 
           <div className="mt-3 flex items-center justify-center gap-6 overflow-hidden rounded-xl border border-haze/60 bg-ink/70 py-3.5 px-4">
-            <span className="font-display text-[15px] text-paper-faint/40">综合</span>
-            <span className="font-display text-[15px] text-paper-faint/40">热点</span>
+            <span className="font-display text-[15px] text-paper-faint/40">要闻</span>
+            <span className="font-display text-[15px] text-paper-faint/40">国际</span>
 
             <div className="relative flex flex-col items-center">
               <span className="font-display text-[16px] font-medium text-paper transition-all duration-150">
@@ -162,13 +162,13 @@ export function CategoryEditScreen({
             </div>
 
             <span className="font-display text-[15px] text-paper-faint/40">科技</span>
-            <span className="font-display text-[15px] text-paper-faint/40">商业</span>
+            <span className="font-display text-[15px] text-paper-faint/40">生活</span>
           </div>
         </div>
       </div>
 
       {/* 分类基本信息 */}
-      <SettingsSection title="基本信息">
+      <SettingsSection variant="plain" title="基本信息">
         <div className="page-x space-y-4 pt-1">
           <div>
             <div className="flex items-center justify-between">
@@ -242,7 +242,7 @@ export function CategoryEditScreen({
       </SettingsSection>
 
       {/* 信源选择与管理 */}
-      <SettingsSection title="信源组合">
+      <SettingsSection variant="plain" title="信源组合">
         <SourcePicker
           sources={allSources}
           selectedIds={selectedIds}

@@ -224,6 +224,7 @@ async function postJson(
         url,
         headers: { 'Content-Type': 'application/json; charset=UTF-8', ...headers },
         data: body,
+        disableRedirects: url.startsWith('http://'),
         connectTimeout: DEFAULT_CONNECT_TIMEOUT_MS,
         readTimeout: readTimeoutMs ?? DEFAULT_READ_TIMEOUT_MS,
       }),

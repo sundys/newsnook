@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import { CircleMinus, PencilLine } from 'lucide-react'
+import { ArrowLeft, ArrowRight, CircleMinus, PencilLine } from 'lucide-react'
 
 import { useLongPressAction } from '../hooks/useLongPressAction'
 import type { Point } from '../lib/contextActions'
@@ -23,9 +23,10 @@ interface Props {
   reduced?: boolean
   onRemoveCategory?: (id: CategoryId) => void
   onRenameCategory?: (id: CategoryId, name: string) => void
+  onMoveCategory?: (id: CategoryId, direction: -1 | 1) => void
 }
 
-const BASE_INDICATOR_WIDTH = 14 // 14px 对应原来的 w-3.5
+const BASE_INDICATOR_WIDTH = 16 // 16px 精致杂志书签指示条
 
 /**
  * 墨砚分类轨道：支持跟手横滑实时联动、丝滑水墨拉伸与自动居中对齐。
@@ -40,6 +41,7 @@ export function CategoryRail({
   reduced = false,
   onRemoveCategory,
   onRenameCategory,
+  onMoveCategory,
 }: Props) {
   const scrollerRef = useRef<HTMLDivElement>(null)
   const tabRefs = useRef<Map<CategoryId, HTMLButtonElement>>(new Map())
@@ -68,8 +70,21 @@ export function CategoryRail({
     : undefined
   const isDynamicCategory = (id: CategoryId) =>
     id === FAVORITES_CATEGORY_ID || id === RECOMMEND_CATEGORY_ID
+  // 推荐、收藏是系统固定入口；与隐藏分类都不应参与快捷排序的相邻索引。
+  const movableCategories = categories.filter((category) => !isDynamicCategory(category.id))
+  const actionIndex = actionCategory && !isDynamicCategory(actionCategory.id)
+    ? movableCategories.findIndex((category) => category.id === actionCategory.id)
+    : -1
   const actionItems: ContextActionItem[] = actionCategory
     ? [
+        ...(onMoveCategory && actionIndex > 0 ? [{
+          id: 'move-left', label: '向前移动', icon: ArrowLeft,
+          onSelect: () => onMoveCategory(actionCategory.id, -1),
+        }] : []),
+        ...(onMoveCategory && actionIndex >= 0 && actionIndex < movableCategories.length - 1 ? [{
+          id: 'move-right', label: '向后移动', icon: ArrowRight,
+          onSelect: () => onMoveCategory(actionCategory.id, 1),
+        }] : []),
         ...(!isDynamicCategory(actionCategory.id) && onRenameCategory
           ? [
               {
@@ -229,15 +244,17 @@ export function CategoryRail({
     <div className="relative">
       <div
         ref={scrollerRef}
-        className="horizontal-scroll-rail scroll-hidden mask-fade-x relative flex gap-0.5 overflow-x-auto px-4 sm:px-6 md:px-8 lg:px-10"
+        className="page-x horizontal-scroll-rail scroll-hidden mask-fade-x relative flex gap-0.5 overflow-x-auto"
         role="tablist"
         aria-label="新闻分类"
       >
         {categories.map((category, index) => {
           const isActiveTab = category.id === activeId
-          const canManage =
-            (!isDynamicCategory(category.id) && Boolean(onRenameCategory)) ||
-            (!isDynamicCategory(category.id) && Boolean(onRemoveCategory))
+          const canManage = !isDynamicCategory(category.id) && (
+            Boolean(onRenameCategory) ||
+            Boolean(onRemoveCategory) ||
+            (Boolean(onMoveCategory) && movableCategories.length > 1)
+          )
           // 计算字体的渐变权重 (0 ~ 1)
           let weight = 0
           if (isDragging || transitionMs > 0) {
@@ -294,13 +311,13 @@ export function CategoryRail({
                 WebkitTouchCallout: 'none',
                 touchAction: 'pan-x',
               }}
-              className="relative shrink-0 px-3 py-1.5 text-paper hover:opacity-90"
+              className="custom-long-press-target relative shrink-0 px-3.5 py-1.5 text-paper hover:opacity-90 first:pl-0"
             >
-              <span className={`block whitespace-nowrap font-display text-[14.5px] leading-none tracking-wide ${weight >= 0.5 ? 'font-medium' : 'font-normal'}`}>
-                {category.short}
+              <span className={`block whitespace-nowrap font-display text-[15px] leading-none tracking-[0.012em] ${weight >= 0.5 ? 'font-medium text-paper' : 'font-normal text-paper/80'}`}>
+                {category.label}
               </span>
               {/* 占位间距，保持高度与垂直居中一致 */}
-              <span className="mx-auto mt-1 block h-px w-3.5 opacity-0" aria-hidden />
+              <span className="mx-auto mt-1.5 block h-px w-4 opacity-0" aria-hidden />
             </button>
           )
         })}
@@ -308,7 +325,7 @@ export function CategoryRail({
         {/* 唯一动态浮动指示器 */}
         {currentCenter > 0 && (
           <span
-            className="pointer-events-none absolute bottom-1 left-0 h-[2px] rounded-full bg-cinnabar shadow-[0_1px_4px_rgba(196,92,74,0.35)] will-change-transform"
+            className="pointer-events-none absolute bottom-1 left-0 h-[2.5px] rounded-full bg-cinnabar shadow-[0_1px_5px_rgba(196,92,74,0.4)] will-change-transform"
             style={{
               width: `${indicatorWidth}px`,
               transform: `translate3d(${indicatorLeft}px, 0, 0)`,

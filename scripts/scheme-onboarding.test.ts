@@ -1,3 +1,4 @@
+import { readAppStyles } from './helpers/readAppStyles'
 /**
  * 风格选择引导：只出现一次、候选项不含自定义、首页空闲才展示。
  * 运行：npm run test:scheme-onboarding
@@ -52,7 +53,7 @@ assert.equal(
 const options = schemeOnboardingOptions()
 assert.deepEqual(
   options.map((item) => item.id),
-  ['ink', 'celadon', 'pearl'],
+  ['ink', 'celadon', 'pearl', 'amber', 'dusk', 'buer'],
   '引导只列出内置风格，不含自定义',
 )
 assert.ok(options.every((item) => item.label && item.caption), '每项都有中文名称与说明')
@@ -82,7 +83,7 @@ console.log('scheme-onboarding preview: ok')
 
 // 同步预览能即时的前提：引导期间 <main> 被搁起、遮罩不透明，整页改 data-scheme 只重画弹层和壳。
 // Chrome 69–84 不支持 content-visibility，必须有 display:none 基线；现代内核再渐进增强。
-const css = readFileSync(resolve('src/index.css'), 'utf8')
+const css = readAppStyles()
 const parkedStart = css.indexOf('.content-parked {')
 assert.ok(parkedStart >= 0, 'index.css 缺少 .content-parked')
 assert.match(

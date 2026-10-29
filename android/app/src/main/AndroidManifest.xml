@@ -1,6 +1,7 @@
 <?xml version="1.0" encoding="utf-8" ?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application
+        android:name=".NewsNookApplication"
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
@@ -19,6 +20,30 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+
+            <!--
+                注册为 Android 系统识别的网页浏览器：
+                1. 声明 DEFAULT + BROWSABLE 处理 http 与 https 链接，以便在外部应用（微信/QQ/邮件/备忘录等）
+                   点击网页链接时，系统弹出「用以下应用打开」候选列表里包含 NewsNook，
+                   且可在 Android 系统设置 -> 应用 -> 默认应用 -> 浏览器应用 中设为默认浏览器。
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="http" />
+                <data android:scheme="https" />
+            </intent-filter>
+
+            <!--
+                2. 声明 APP_BROWSER 分类，让 Android 10+（API 29+）的 RoleManager 与系统设置
+                   识别为完整的浏览器类别应用。
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.APP_BROWSER" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
 
             <!--
@@ -53,6 +78,18 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="newsnook" android:host="auth" />
             </intent-filter>
+
+            <!--
+                Linux.do/Discourse 标准委托认证回流。系统浏览器里可使用 GitHub / Google 等
+                Linux.do 当前开放的第三方登录，授权后返回 RSA 加密 payload 与一次性密码。
+                与 NewsNook 云账户 OAuth 回流严格分离，避免 token 路由串线。
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="discourse" android:host="auth_redirect" />
+            </intent-filter>
         </activity>
 
         <service
@@ -60,6 +97,24 @@
             android:exported="false"
             android:stopWithTask="false"
             android:foregroundServiceType="connectedDevice" />
+
+        <service
+            android:name=".ReadAloudPlaybackService"
+            android:exported="false"
+            android:stopWithTask="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <service android:name=".BrowserAgentForegroundService" android:exported="false"
+            android:stopWithTask="true" android:foregroundServiceType="specialUse">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-started browser automation with an ongoing notification and pause action; keeps the local agent and website WebViews executing while the screen is off." />
+        </service>
+
+        <service
+            android:name=".BrowserAgentPdfService"
+            android:exported="false"
+            android:isolatedProcess="true"
+            android:process=":agent_pdf" />
 
         <provider
             android:name="androidx.core.content.FileProvider"
@@ -78,10 +133,19 @@
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
     <uses-permission
         android:name="android.permission.NEARBY_WIFI_DEVICES"
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- AppUpdate：隐藏系统 DownloadManager 通知，改由自管进度通知 -->
+    <uses-permission android:name="android.permission.DOWNLOAD_WITHOUT_NOTIFICATION" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
 </manifest>

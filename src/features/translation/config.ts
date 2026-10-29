@@ -167,5 +167,5 @@ export function translationLanguageLabel(id: TranslationSourceLanguage): string 
 }
 
 export function translationDisplayModeLabel(mode: TranslationDisplayMode): string {
-  return mode === 'compare' ? '对比翻译' : '全文替代'
+  return mode === 'compare' ? '双语对照' : '仅显示译文'
 }

@@ -168,9 +168,11 @@ export class TranslationService {
       node.parentElement?.setAttribute('data-translated', 'true')
     })
     options?.onProgress?.({ completed: texts.length, total: texts.length })
+    const replaceHtml = document.body.innerHTML
     return {
       title: finalizeTranslatedText(translations[0] ?? currentTitle, prefs.targetLanguage),
-      html: document.body.innerHTML,
+      html: replaceHtml,
+      replaceHtml,
     }
   }
 
@@ -193,6 +195,25 @@ export class TranslationService {
       semanticBlocks.length || !shouldTranslate(document.body.textContent ?? '')
         ? semanticBlocks
         : [document.body]
+
+    // 同步构建纯译文 DOM，无需二次请求即可瞬间在「双语对照」与「仅显示译文」间切换
+    const replaceDoc = new DOMParser().parseFromString(
+      `<!doctype html><html><body>${document.body.innerHTML}</body></html>`,
+      'text/html',
+    )
+    const replaceSemanticBlocks = Array.from(
+      replaceDoc.body.querySelectorAll<HTMLElement>(COMPARISON_BLOCK_SELECTOR),
+    ).filter(
+      (element) =>
+        !isBlocked(element) &&
+        !element.querySelector(COMPARISON_BLOCK_SELECTOR) &&
+        shouldTranslate(element.textContent ?? ''),
+    )
+    const replaceBlocks =
+      replaceSemanticBlocks.length || !shouldTranslate(replaceDoc.body.textContent ?? '')
+        ? replaceSemanticBlocks
+        : [replaceDoc.body]
+
     const texts = [title.trim(), ...blocks.map((block) => (block.textContent ?? '').trim())]
     let currentTitle = title
     let completedCount = 0
@@ -226,6 +247,13 @@ export class TranslationService {
                 translationSpan.textContent = normalized
                 block.setAttribute('data-translated', 'true')
               }
+
+              const rBlock = replaceBlocks[blockIndex]
+              if (rBlock) {
+                const media = Array.from(rBlock.querySelectorAll('img, video, audio, picture, iframe, figure'))
+                rBlock.replaceChildren(...media, replaceDoc.createTextNode(normalized))
+                rBlock.setAttribute('data-translated', 'true')
+              }
             }
           })
           completedCount += batchTranslations.length
@@ -234,13 +262,25 @@ export class TranslationService {
           const isLast = completedCount >= texts.length
           if (options?.onPartial && (isLast || now - lastPartialAt >= 120)) {
             lastPartialAt = now
-            options.onPartial({ title: currentTitle, html: document.body.innerHTML })
+            const cHtml = document.body.innerHTML
+            const rHtml = replaceDoc.body.innerHTML
+            options.onPartial({
+              title: currentTitle,
+              html: cHtml,
+              compareHtml: cHtml,
+              replaceHtml: rHtml,
+            })
           }
         },
       })
     } catch (error) {
       if (completedCount > 0 && options?.onPartial) {
-        options.onPartial({ title: currentTitle, html: document.body.innerHTML })
+        options.onPartial({
+          title: currentTitle,
+          html: document.body.innerHTML,
+          compareHtml: document.body.innerHTML,
+          replaceHtml: replaceDoc.body.innerHTML,
+        })
       }
       throw error
     }
@@ -254,16 +294,28 @@ export class TranslationService {
         translationSpan.lang = prefs.targetLanguage
         block.append(translationSpan)
       }
-      translationSpan.textContent = finalizeTranslatedText(
+      const normalized = finalizeTranslatedText(
         translations[index + 1],
         prefs.targetLanguage,
       )
+      translationSpan.textContent = normalized
       block.setAttribute('data-translated', 'true')
+
+      const rBlock = replaceBlocks[index]
+      if (rBlock) {
+        const media = Array.from(rBlock.querySelectorAll('img, video, audio, picture, iframe, figure'))
+        rBlock.replaceChildren(...media, replaceDoc.createTextNode(normalized))
+        rBlock.setAttribute('data-translated', 'true')
+      }
     })
     options?.onProgress?.({ completed: texts.length, total: texts.length })
+    const compareHtml = document.body.innerHTML
+    const replaceHtml = replaceDoc.body.innerHTML
     return {
       title: finalizeTranslatedText(translations[0] ?? currentTitle, prefs.targetLanguage),
-      html: document.body.innerHTML,
+      html: compareHtml,
+      compareHtml,
+      replaceHtml,
     }
   }
 }

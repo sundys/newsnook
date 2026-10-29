@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { MouseEvent, MutableRefObject, ReactNode, RefObject } from 'react'
+import { createPortal } from 'react-dom'
 import { Browser } from '@capacitor/browser'
 import { ChevronDown, ChevronUp, Copy, ExternalLink, Heart, Info, Loader2, LockKeyhole, MessageCircle, MessageSquareQuote, SquarePen, ThumbsDown, ThumbsUp, UserPlus, X } from 'lucide-react'
 import type { ZhihuCommentDraftStore } from '../comments/draftStore'
@@ -8,7 +9,8 @@ import type { ZhihuContentDetail } from '../api/decode'
 import { ZhihuApiError } from '../api/errors'
 import { parseZhihuLink, parseZhihuVideoId } from '../content/links'
 import { normalizeZhihuContentHtml } from '../content/normalize'
-import { ZhihuAnswerNavigator, type ZhihuAnswerNeighbors } from '../content/answerNavigation'
+import { ZhihuAnswerDetailPreloader, ZhihuAnswerNavigator, type ZhihuAnswerNeighbors } from '../content/answerNavigation'
+import { useAnswerSwipe } from '../content/useAnswerSwipe'
 import type { ZhihuContentService } from '../content/service'
 import type { ZhihuRecommendationSignalItem } from '../feed/recommendation'
 import type { ZhihuFeedService } from '../feed/service'
@@ -20,12 +22,14 @@ import type { ZhihuQuestionAnswerOrder } from '../api/endpoints'
 import { SegmentedControl } from '../../../components/SegmentedControl'
 import { AiSpeedReadPanel } from '../../../components/AiSpeedReadPanel'
 import { ImageLightbox } from '../../../components/ImageLightbox'
+import { collectImageGallery, type ImageGallery } from '../../../lib/imageGallery'
 import { InlineArticleVideos } from '../../../components/InlineArticleVideos'
 import { InlineYoutubeEmbeds } from '../../../components/InlineYoutubeEmbeds'
 import { InlineVideoPages } from '../../../components/InlineVideoPages'
 import type { MediaDescriptor } from '../../mediaSniffer/types'
 import { useProgressiveImages } from '../../../hooks/useProgressiveImages'
 import { useReaderFontPinch } from '../../../hooks/useReaderFontPinch'
+import { useReducedMotion } from '../../../hooks/useReducedMotion'
 import { useSpeedRead } from '../../speedRead/useSpeedRead'
 import type { SpeedReadUiState } from '../../speedRead/types'
 import type { CloudTranslationConfig } from '../../translation/types'
@@ -33,7 +37,9 @@ import { ZhihuCollectionPicker } from './ZhihuCollectionPicker'
 import { ZhihuCommentsSection } from './ZhihuCommentsSection'
 import {
   ZhihuAuthorAvatar,
+  ZhihuAnswerContinuation,
   ZhihuAnswerMeta,
+  ZhihuAnswerPeek,
   ZhihuContentRow,
   ZhihuEntityIcon,
   ZhihuErrorBanner,
@@ -42,9 +48,11 @@ import {
   ZhihuSurface,
 } from './ZhihuUi'
 import { formatZhihuCount, zhihuEntityLabel } from './ZhihuUiUtils'
+import { ZhihuRemarkBadge, ZhihuRemarkEditButton } from './ZhihuUserRemark'
 
 interface Props {
   refValue: ZhihuEntityRef
+  onArticleRead?: (detail: ZhihuContentSummary) => void
   preview?: ZhihuContentSummary
   contentService: ZhihuContentService
   feedService: ZhihuFeedService
@@ -63,6 +71,7 @@ interface Props {
   ) => void
   onWriteAnswer: (questionId: string) => void
   scrollContainerRef: RefObject<HTMLElement | null>
+  answerPreviewHostRef: RefObject<HTMLElement | null>
   fontScale: number
   onFontScale: (next: number) => void
   speedReadConfig: CloudTranslationConfig
@@ -148,8 +157,8 @@ export function ZhihuAnswerActionBar({
 
   return (
     <nav
-      className="pointer-events-none fixed inset-x-0 z-40 flex justify-center px-3 sm:px-4"
-      style={{ bottom: 'calc(var(--sab) + 0.65rem)' }}
+      className="fixed inset-x-0 bottom-0 z-40 flex justify-center border-t border-haze/70 bg-ink-raised/98 px-2 sm:px-4"
+      style={{ paddingBottom: 'var(--sab, 0px)' }}
       aria-label="回答操作"
     >
       <div className="relative w-full max-w-lg">
@@ -159,17 +168,17 @@ export function ZhihuAnswerActionBar({
           </div>
         )}
 
-        <div className="pointer-events-auto flex h-12 min-w-0 items-center gap-0.5 rounded-2xl border border-haze/65 bg-ink/88 p-1 shadow-[0_10px_28px_-18px_rgba(0,0,0,0.68)] backdrop-blur-xl">
+        <div className="zhihu-action-dock pointer-events-auto flex h-14 min-w-0 items-center gap-1 px-1.5">
           <button
             type="button"
             disabled={voteDisabled}
             onClick={onUpVote}
             aria-label={voteState === 'up' ? '取消赞同' : '赞同'}
             title={!authenticated ? '登录后可赞同' : voteState === 'up' ? '取消赞同' : '赞同'}
-            className={`flex h-10 min-w-0 items-center justify-center gap-1.5 rounded-xl px-3 transition-[background-color,color,transform] duration-200 active:scale-[0.96] disabled:opacity-35 disabled:active:scale-100 ${voteState === 'up' ? 'bg-cinnabar/12 text-cinnabar-soft' : 'text-paper-muted/85 hover:bg-paper/5 hover:text-paper'}`}
+            className={`zhihu-vote-pill flex h-10 min-w-0 items-center justify-center gap-1.5 rounded-xl px-3.5 font-sans transition-all duration-150 active:scale-95 disabled:opacity-35 disabled:active:scale-100 ${voteState === 'up' ? 'is-active bg-[#0066FF] font-semibold text-white shadow-[0_2px_12px_rgba(0,102,255,0.45)]' : 'text-paper-muted hover:bg-paper/5 hover:text-paper'}`}
           >
-            <ThumbsUp size={17.5} strokeWidth={1.75} fill={voteState === 'up' ? 'currentColor' : 'none'} />
-            {voteCountLabel && <span className="max-w-16 truncate text-[11.5px] font-medium tabular-nums">{voteCountLabel}</span>}
+            <ThumbsUp size={16.5} strokeWidth={2.2} fill={voteState === 'up' ? 'currentColor' : 'none'} className="shrink-0" />
+            {voteCountLabel && <span className="max-w-16 truncate text-[12.5px] font-semibold tabular-nums">{voteCountLabel}</span>}
           </button>
 
           <button
@@ -178,12 +187,12 @@ export function ZhihuAnswerActionBar({
             onClick={onDownVote}
             aria-label={voteState === 'down' ? '取消反对' : '反对'}
             title={!authenticated ? '登录后可反对' : voteState === 'down' ? '取消反对' : '反对'}
-            className={`flex size-10 shrink-0 items-center justify-center rounded-xl transition-[background-color,color,transform] duration-200 active:scale-[0.94] disabled:opacity-35 disabled:active:scale-100 ${voteState === 'down' ? 'bg-cinnabar/10 text-cinnabar-soft' : 'text-paper-muted/80 hover:bg-paper/5 hover:text-paper'}`}
+            className={`flex size-10 shrink-0 items-center justify-center rounded-xl transition-all duration-150 active:scale-90 disabled:opacity-35 disabled:active:scale-100 ${voteState === 'down' ? 'bg-[#0066FF]/15 text-[#0066FF] dark:text-[#3B82F6]' : 'text-paper-muted/80 hover:bg-paper/5 hover:text-paper'}`}
           >
-            <ThumbsDown size={17} strokeWidth={1.7} fill={voteState === 'down' ? 'currentColor' : 'none'} />
+            <ThumbsDown size={16} strokeWidth={1.9} fill={voteState === 'down' ? 'currentColor' : 'none'} />
           </button>
 
-          <div className="flex size-10 shrink-0 items-center justify-center text-paper-muted/80 [&>button]:size-full [&>button]:min-h-0 [&>button]:rounded-xl [&>button]:border-0 [&>button]:bg-transparent [&>button]:px-0 [&>button]:transition-[background-color,color,transform] [&>button]:duration-200 [&>button:hover]:bg-paper/5 [&>button:hover]:text-paper [&>button:active]:scale-[0.94]">
+          <div className="flex size-10 shrink-0 items-center justify-center text-paper-muted/80 [&>button]:size-full [&>button]:min-h-0 [&>button]:rounded-xl [&>button]:border-0 [&>button]:bg-transparent [&>button]:px-0 [&>button]:transition-all [&>button]:duration-150 [&>button:hover]:bg-paper/5 [&>button:hover]:text-paper [&>button:active]:scale-90">
             {collectionAction}
           </div>
 
@@ -193,13 +202,13 @@ export function ZhihuAnswerActionBar({
             onClick={onOpenComments}
             aria-label={commentCountLabel ? `查看 ${commentCountLabel} 条评论` : '查看评论'}
             title={commentsDisabled ? '当前内容暂无法读取评论' : '查看评论'}
-            className="flex h-10 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-xl px-2.5 text-paper-muted/85 transition-[background-color,color,transform] duration-200 hover:bg-paper/5 hover:text-paper active:scale-[0.96] disabled:opacity-35 disabled:active:scale-100"
+            className="flex h-10 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-xl px-2.5 text-paper-muted transition-all duration-150 hover:bg-paper/5 hover:text-paper active:scale-95 disabled:opacity-35 disabled:active:scale-100"
           >
-            <MessageCircle size={17.5} strokeWidth={1.7} />
-            {commentCountLabel && <span className="max-w-14 truncate text-[11px] font-medium tabular-nums">{commentCountLabel}</span>}
+            <MessageCircle size={16.5} strokeWidth={1.8} className="shrink-0" />
+            {commentCountLabel && <span className="max-w-14 truncate text-[12px] font-medium tabular-nums">{commentCountLabel}</span>}
           </button>
 
-          {(onPreviousAnswer || onNextAnswer) && <span className="mx-0.5 h-5 w-px shrink-0 bg-haze/70" aria-hidden />}
+          {(onPreviousAnswer || onNextAnswer) && <span className="mx-0.5 h-5 w-px shrink-0 bg-paper/[0.08]" aria-hidden />}
           {(onPreviousAnswer || onNextAnswer) && (
             <div className="flex shrink-0 items-center gap-0.5" aria-label="此问题的回答导航">
               <button
@@ -208,9 +217,9 @@ export function ZhihuAnswerActionBar({
                 onClick={onPreviousAnswer}
                 aria-label="上一个回答"
                 title="上一个回答"
-                className="flex size-9 items-center justify-center rounded-xl text-paper-muted/75 transition-[background-color,color,transform] hover:bg-paper/5 hover:text-cinnabar-soft active:scale-[0.94] disabled:opacity-25"
+                className="flex size-9 items-center justify-center rounded-xl text-paper-muted/80 transition-all hover:bg-paper/5 hover:text-[#0066FF] active:scale-90 disabled:opacity-25"
               >
-                <ChevronUp size={17} strokeWidth={1.8} />
+                <ChevronUp size={17} strokeWidth={2} />
               </button>
               <button
                 type="button"
@@ -218,9 +227,9 @@ export function ZhihuAnswerActionBar({
                 onClick={onNextAnswer}
                 aria-label="下一个回答"
                 title="下一个回答"
-                className="flex size-9 items-center justify-center rounded-xl text-paper-muted/75 transition-[background-color,color,transform] hover:bg-paper/5 hover:text-cinnabar-soft active:scale-[0.94] disabled:opacity-25"
+                className="flex size-9 items-center justify-center rounded-xl text-paper-muted/80 transition-all hover:bg-paper/5 hover:text-[#0066FF] active:scale-90 disabled:opacity-25"
               >
-                <ChevronDown size={17} strokeWidth={1.8} />
+                <ChevronDown size={17} strokeWidth={2} />
               </button>
             </div>
           )}
@@ -251,14 +260,14 @@ export function ZhihuAnswerCommentsDialog({ open, onClose, children }: ZhihuAnsw
 
   return (
     <div
-      className="fixed inset-0 z-[74] flex min-h-0 items-end justify-center bg-black/40 backdrop-blur-[2px] sm:p-4"
+      className="fixed inset-0 z-[74] flex min-h-0 items-end justify-center bg-black/40 backdrop-blur-[3px] sm:p-4"
       onClick={onClose}
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-label="知乎回答评论"
-        className="flex h-[88dvh] min-h-0 w-full max-w-3xl flex-col overflow-hidden rounded-t-[1.75rem] border-t border-haze/80 bg-ink/98 shadow-2xl sm:h-[86dvh] sm:rounded-[1.5rem] sm:border"
+        className="flex h-[88dvh] min-h-0 w-full max-w-3xl flex-col overflow-hidden rounded-t-[2rem] border-t border-paper/[0.08] bg-ink/95 shadow-2xl backdrop-blur-2xl sm:h-[86dvh] sm:rounded-[1.75rem] sm:border"
         style={{
           transform: dragY ? `translate3d(0, ${dragY}px, 0)` : undefined,
           transition: dragStartYRef.current === null ? 'transform 180ms var(--ease-ink)' : 'none',
@@ -299,8 +308,10 @@ export function ZhihuAnswerCommentsDialog({ open, onClose, children }: ZhihuAnsw
   )
 }
 
-export function ZhihuContentScreen({ refValue, preview, contentService, feedService, commentsService, onNavigate, onReplaceNavigate, overlayCloserRef, restoreAnchor, authenticated, accountId, commentDraftStore, interaction, onRecommendationSignal, onWriteAnswer, scrollContainerRef, fontScale, onFontScale, speedReadConfig, onSpeedReadHeaderActionChange }: Props) {
+export function ZhihuContentScreen({ refValue, preview, onArticleRead, contentService, feedService, commentsService, onNavigate, onReplaceNavigate, overlayCloserRef, restoreAnchor, authenticated, accountId, commentDraftStore, interaction, onRecommendationSignal, onWriteAnswer, scrollContainerRef, answerPreviewHostRef, fontScale, onFontScale, speedReadConfig, onSpeedReadHeaderActionChange }: Props) {
   const [detail, setDetail] = useState<ZhihuContentDetail | null>(null)
+  const onArticleReadRef = useRef(onArticleRead)
+  onArticleReadRef.current = onArticleRead
   const [answers, setAnswers] = useState<ZhihuContentSummary[]>([])
   const [answerOrder, setAnswerOrder] = useState<ZhihuQuestionAnswerOrder>('default')
   const [answersCursor, setAnswersCursor] = useState<string | undefined>()
@@ -308,11 +319,18 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
   const [answersLoadingMore, setAnswersLoadingMore] = useState(false)
   const [answersError, setAnswersError] = useState<string | null>(null)
   const answerNavigator = useMemo(() => new ZhihuAnswerNavigator(feedService), [feedService])
+  const answerDetailPreloader = useMemo(() => new ZhihuAnswerDetailPreloader(contentService), [contentService])
   const [answerNeighbors, setAnswerNeighbors] = useState<{
     questionId: string
     answerId: string
     value: ZhihuAnswerNeighbors
   } | null>(null)
+  const [answerNavigationLoading, setAnswerNavigationLoading] = useState(false)
+  const [answerNavigationError, setAnswerNavigationError] = useState<string | null>(null)
+  const [answerNavigationAttempt, setAnswerNavigationAttempt] = useState(0)
+  const [, setAnswerPreviewRevision] = useState(0)
+  const [answerPreviewAttempt, setAnswerPreviewAttempt] = useState(0)
+  const [answerPreviewErrors, setAnswerPreviewErrors] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
   const [voteState, setVoteState] = useState<ZhihuVoteState>('neutral')
@@ -332,7 +350,7 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
   )
   const proseRef = useRef<HTMLDivElement | null>(null)
   const questionDetailRef = useRef<HTMLDivElement | null>(null)
-  const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null)
+  const [lightbox, setLightbox] = useState<ImageGallery | null>(null)
   const [commentsOpen, setCommentsOpen] = useState(Boolean(restoreAnchor))
   const [questionDetailExpanded, setQuestionDetailExpanded] = useState(false)
   const [questionDetailCanCollapse, setQuestionDetailCanCollapse] = useState(false)
@@ -340,6 +358,7 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
   const [segmentCommentsOpen, setSegmentCommentsOpen] = useState(false)
   const [segmentBusy, setSegmentBusy] = useState(false)
   const [segmentError, setSegmentError] = useState<string | null>(null)
+  const reduced = useReducedMotion()
   const { hudLabel } = useReaderFontPinch({
     targetRef: scrollContainerRef,
     fontScale,
@@ -354,6 +373,12 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
     ),
     [detail?.contentHtml, detail?.segmentInfos, refValue],
   )
+  // 这不是普通的“渲染一段 HTML”：InlineArticleVideos / InlineYoutubeEmbeds /
+  // InlineVideoPages 会在该 DOM 子树内部挂 portal/播放器。React 19 对一个新的
+  // dangerouslySetInnerHTML 对象会重新写 innerHTML，即便 __html 字符串没变；回答页
+  // 的点赞数、上下回答等任意状态更新都会因此抹掉播放器宿主。保持对象引用稳定，
+  // 只有 normalizedHtml 真正变化时才允许 React 重建正文 DOM。
+  const normalizedHtmlMarkup = useMemo(() => ({ __html: normalizedHtml }), [normalizedHtml])
   const speedReadDocument = useMemo(() => {
     if (!detail || detail.ref.kind !== refValue.kind || detail.ref.id !== refValue.id) return null
     if (!['answer', 'article', 'pin'].includes(refValue.kind) || !normalizedHtml.trim()) return null
@@ -416,6 +441,7 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
     setSelectedSegment(null)
     setSegmentCommentsOpen(false)
     setSegmentError(null)
+    setAnswerNavigationError(null)
   }, [refValue.id, refValue.kind, restoreAnchor])
 
   useEffect(() => {
@@ -472,18 +498,23 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
 
   useEffect(() => {
     const controller = new AbortController()
-    setDetail(preview ? detailFromPreview(preview) : null)
+    const cachedAnswer = refValue.kind === 'answer' ? answerDetailPreloader.peek(refValue) : undefined
+    setDetail(cachedAnswer ?? (preview ? detailFromPreview(preview) : null))
     setAnswers([])
     setAnswersCursor(undefined)
     setAnswersHasMore(false)
     setAnswersError(null)
-    setLoading(true)
+    setLoading(!cachedAnswer)
     setError(null)
     setGuestLimited(!authenticated && Boolean(preview))
-    void contentService.read(refValue, controller.signal).then(
+    const detailRequest = refValue.kind === 'answer'
+      ? answerDetailPreloader.load(refValue)
+      : contentService.read(refValue, controller.signal)
+    void detailRequest.then(
       async (value) => {
         if (controller.signal.aborted) return
         setDetail(value)
+        onArticleReadRef.current?.(value)
         setGuestLimited(false)
         setVoteState(value.voteState)
         setVoteCount(value.voteupCount)
@@ -521,7 +552,7 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
       },
     )
     return () => controller.abort()
-  }, [answerOrder, authenticated, contentService, feedService, preview, refValue])
+  }, [answerDetailPreloader, answerOrder, authenticated, contentService, feedService, preview, refValue])
 
   useEffect(() => {
     if (refValue.kind !== 'answer' || detail?.ref.kind !== 'answer' || detail.ref.id !== refValue.id || !detail.questionId) return
@@ -529,16 +560,106 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
     const answerId = refValue.id
     const controller = new AbortController()
     setAnswerNeighbors((current) => current?.questionId === questionId && current.answerId === answerId ? current : null)
+    setAnswerNavigationLoading(true)
+    setAnswerNavigationError(null)
     void answerNavigator.neighbors(questionId, answerId, controller.signal).then(
       (value) => {
-        if (!controller.signal.aborted) setAnswerNeighbors({ questionId, answerId, value })
+        if (!controller.signal.aborted) {
+          setAnswerNeighbors({ questionId, answerId, value })
+          setAnswerNavigationLoading(false)
+        }
       },
-      () => {
-        // 正文已经可读时，回答队列失败只影响上/下一个导航，不抹掉正文。
+      (reason) => {
+        if (!controller.signal.aborted) {
+          setAnswerNavigationError(reason instanceof Error ? reason.message : '回答顺序加载失败')
+          setAnswerNavigationLoading(false)
+        }
       },
     )
     return () => controller.abort()
-  }, [answerNavigator, detail?.questionId, detail?.ref.id, detail?.ref.kind, refValue.id, refValue.kind])
+  }, [answerNavigationAttempt, answerNavigator, detail?.questionId, detail?.ref.id, detail?.ref.kind, refValue.id, refValue.kind])
+
+  const resolvedAnswerNeighbors = answerNeighbors
+    && answerNeighbors.questionId === detail?.questionId
+    && answerNeighbors.answerId === refValue.id
+    ? answerNeighbors.value
+    : null
+  const previousAnswerRef = resolvedAnswerNeighbors?.previous
+  const nextAnswerRef = resolvedAnswerNeighbors?.next
+  useEffect(() => {
+    const targets = [previousAnswerRef, nextAnswerRef].filter((value): value is ZhihuEntityRef => Boolean(value))
+    if (targets.length === 0) return
+    let alive = true
+    for (const target of targets) {
+      if (answerDetailPreloader.peek(target)) {
+        setAnswerPreviewErrors((current) => {
+          if (!(target.id in current)) return current
+          const next = { ...current }
+          delete next[target.id]
+          return next
+        })
+        continue
+      }
+      setAnswerPreviewErrors((current) => {
+        if (!(target.id in current)) return current
+        const next = { ...current }
+        delete next[target.id]
+        return next
+      })
+      void answerDetailPreloader.load(target).then(
+        () => {
+          if (!alive) return
+          setAnswerPreviewErrors((current) => {
+            if (!(target.id in current)) return current
+            const next = { ...current }
+            delete next[target.id]
+            return next
+          })
+          setAnswerPreviewRevision((value) => value + 1)
+        },
+        (reason) => {
+          if (!alive) return
+          setAnswerPreviewErrors((current) => ({
+            ...current,
+            [target.id]: reason instanceof Error ? reason.message : '回答正文预加载失败',
+          }))
+        },
+      )
+    }
+    return () => { alive = false }
+  }, [answerDetailPreloader, answerPreviewAttempt, nextAnswerRef, previousAnswerRef])
+
+  const navigateToAnswer = useCallback((target: ZhihuEntityRef) => {
+    const cached = answerDetailPreloader.peek(target)
+    if (cached) {
+      setDetail(cached)
+      setVoteState(cached.voteState)
+      setVoteCount(cached.voteupCount)
+      setFollowing(cached.isFollowing)
+      setGuestLimited(false)
+      setLoading(false)
+      setError(null)
+    }
+    onReplaceNavigate(target)
+  }, [answerDetailPreloader, onReplaceNavigate])
+
+  const answerSwipe = useAnswerSwipe({
+    containerRef: scrollContainerRef,
+    enabled: refValue.kind === 'answer'
+      && Boolean(detail?.questionId)
+      && !loading
+      && !guestLimited
+      && !lightbox
+      && !commentsOpen
+      && !selectedSegment
+      && !speedReadOpen,
+    reduced,
+    canGo: (direction) => Boolean(direction === 'previous' ? previousAnswerRef : nextAnswerRef),
+    onCommit: (direction) => {
+      const target = direction === 'previous' ? previousAnswerRef : nextAnswerRef
+      if (target) navigateToAnswer(target)
+    },
+  })
 
   const loadMoreAnswers = async () => {
     if (refValue.kind !== 'question' || !answersCursor || answersLoadingMore) return
@@ -680,7 +801,7 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
       if (src) {
         event.preventDefault()
         event.stopPropagation()
-        setLightbox({ src, alt: image.alt || detail?.title || '' })
+        setLightbox(collectImageGallery(proseRef.current, { src, alt: image.alt || detail?.title || '' }))
         return
       }
     }
@@ -706,21 +827,61 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
 
   const voteWritable = canExecuteZhihuOperation('vote.set')
   const questionFollowWritable = canExecuteZhihuOperation(following ? 'follow.question.clear' : 'follow.question.set')
-  const resolvedAnswerNeighbors = answerNeighbors
-    && answerNeighbors.questionId === detail.questionId
-    && answerNeighbors.answerId === refValue.id
-    ? answerNeighbors.value
-    : null
-  const previousAnswerRef = resolvedAnswerNeighbors?.previous
-  const nextAnswerRef = resolvedAnswerNeighbors?.next
   const voteCountLabel = formatZhihuCount(voteCount)
   const commentCountLabel = formatZhihuCount(detail.commentCount)
 
   const actionClass = 'inline-flex min-h-9 items-center justify-center gap-1.5 rounded-full border border-haze bg-ink-raised/55 px-3 text-[11px] text-paper-muted transition-colors hover:border-paper-faint/45 hover:bg-ink-raised hover:text-paper disabled:opacity-35'
   const activeActionClass = 'border-cinnabar/45 bg-cinnabar/12 text-cinnabar-soft'
+  const answerPreviewItem = answerSwipe.direction === 'previous'
+    ? resolvedAnswerNeighbors?.previousPreview
+    : resolvedAnswerNeighbors?.nextPreview
+  const answerPreviewRef = answerSwipe.direction === 'previous' ? previousAnswerRef : nextAnswerRef
+  const answerPreviewDetail = answerPreviewRef ? answerDetailPreloader.peek(answerPreviewRef) : undefined
+  const answerPreviewError = answerPreviewRef ? answerPreviewErrors[answerPreviewRef.id] : undefined
+  const answerPreviewUnavailable = answerNavigationError
+    ? '回答顺序加载失败，请在正文底部重试'
+    : answerPreviewError
+      ? `正文预加载失败：${answerPreviewError}。松开后可重试打开`
+    : answerNavigationLoading || !resolvedAnswerNeighbors
+      ? '正在预加载完整回答…'
+      : answerSwipe.direction === 'previous'
+        ? '已是第一个回答'
+        : answerPreviewRef
+          ? '正在预加载完整回答…'
+          : '已是最后一个回答'
+  const answerPreviewProgress = answerSwipe.viewportHeight > 0
+    ? Math.min(1, Math.abs(answerSwipe.dragY) / answerSwipe.viewportHeight)
+    : 0
+  const answerPreviewPortal = answerSwipe.direction && answerPreviewHostRef.current
+    ? createPortal(
+        <div
+          className="absolute inset-0 will-change-transform"
+          style={{
+            transform: answerSwipe.direction === 'previous'
+              ? `translate3d(0, calc(${answerSwipe.dragY}px - 100%), 0)`
+              : `translate3d(0, calc(${answerSwipe.dragY}px + 100%), 0)`,
+            transition: answerSwipe.transitionMs > 0
+              ? `transform ${answerSwipe.transitionMs}ms var(--ease-ink)`
+              : 'none',
+            backfaceVisibility: 'hidden',
+            opacity: 0.86 + answerPreviewProgress * 0.14,
+          }}
+        >
+          <ZhihuAnswerPeek
+            direction={answerSwipe.direction}
+            phase={answerSwipe.phase === 'ready' || answerSwipe.phase === 'committing' ? 'ready' : 'pulling'}
+            item={answerPreviewItem}
+            detail={answerPreviewDetail}
+            unavailableLabel={answerPreviewUnavailable}
+          />
+        </div>,
+        answerPreviewHostRef.current,
+      )
+    : null
 
   return (
-    <article className={`mx-auto w-full max-w-3xl px-4 pt-5 sm:px-6 ${refValue.kind === 'answer' ? 'pb-28' : 'pb-24'}`}>
+    <article className={`mx-auto w-full max-w-3xl px-4 pt-5 sm:px-6 ${refValue.kind === 'answer' ? 'pb-[calc(6rem+var(--sab,0px))]' : 'pb-24'}`}>
+      {answerPreviewPortal}
       {hudLabel && (
         <div
           className="pointer-events-none fixed left-1/2 top-[40%] z-[70] -translate-x-1/2 rounded-full border border-haze bg-ink/92 px-3.5 py-1.5 font-mono text-[12px] text-paper shadow-lg backdrop-blur-md"
@@ -730,42 +891,70 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
           {hudLabel}
         </div>
       )}
-      <header className="border-b border-haze/55 pb-5">
+      <header className="border-b border-haze/45 pb-5">
         {refValue.kind !== 'answer' && (
-          <div className="flex items-center gap-1.5 font-mono text-[10px] tracking-[0.12em] text-cinnabar-soft">
-            <ZhihuEntityIcon kind={refValue.kind} size={12} />
+          <div className="flex items-center gap-1.5 font-sans text-[11px] font-medium text-sky-500">
+            <ZhihuEntityIcon kind={refValue.kind} size={13} />
             <span>{zhihuEntityLabel(refValue.kind)}</span>
           </div>
         )}
-        <h1 className={`${refValue.kind === 'answer' ? 'mt-0' : 'mt-2'} font-display text-[27px] font-medium leading-[1.34] tracking-[0.003em] text-paper sm:text-[31px]`}>
+        <h1 className={`${refValue.kind === 'answer' ? 'mt-0' : 'mt-2'} font-sans text-[21px] font-bold leading-[1.36] tracking-tight text-paper sm:text-[25px]`}>
           {refValue.kind === 'answer' && detail.questionId ? (
             <button
               type="button"
               onClick={() => onNavigate({ kind: 'question', id: detail.questionId! })}
               title="查看问题详情"
-              className="text-left transition-colors hover:text-cinnabar-soft"
+              className="text-left transition-colors hover:text-sky-500"
             >
               {detail.title}
             </button>
           ) : detail.title}
         </h1>
 
-        <div className="mt-3 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-[12px] text-paper-faint">
-          {detail.author?.name && (
+        {/* 回答页：原生答主身份卡片 */}
+        {detail.author?.name ? (
+          <div className="mt-4 flex items-center justify-between gap-3 rounded-2xl border border-haze/45 bg-ink-raised/30 p-3 sm:p-3.5">
             <button
               type="button"
               onClick={() => onNavigate({ kind: 'people', id: detail.author!.token ?? detail.author!.id })}
               aria-label={`查看 ${detail.author.name} 的主页`}
-              className="group inline-flex max-w-full items-center gap-2 rounded-full text-left transition-colors hover:text-cinnabar-soft"
+              className="group flex min-w-0 flex-1 items-center gap-3 text-left"
             >
-              <ZhihuAuthorAvatar author={detail.author} className="size-8" />
-              <span className="max-w-[12rem] truncate font-medium text-paper-muted transition-colors group-hover:text-cinnabar-soft sm:max-w-[18rem]">{detail.author.name}</span>
+              <ZhihuAuthorAvatar author={detail.author} className="size-10 shrink-0" />
+              <div className="min-w-0 flex-1">
+                <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                  <span className="truncate font-sans text-[14.5px] font-semibold text-paper transition-colors group-hover:text-sky-500">
+                    {detail.author.name}
+                  </span>
+                  <ZhihuRemarkBadge author={detail.author} />
+                </div>
+                {detail.author.headline ? (
+                  <p className="truncate text-[12px] text-paper-muted">
+                    {detail.author.headline}
+                  </p>
+                ) : (
+                  <p className="text-[11.5px] text-paper-faint">知乎答主</p>
+                )}
+              </div>
             </button>
-          )}
-          {detail.author?.headline && <span className="max-w-full truncate">{detail.author.headline}</span>}
-          {refValue.kind !== 'answer' && voteCountLabel && <span>{voteCountLabel} 赞同</span>}
-          {refValue.kind !== 'answer' && commentCountLabel && <span>{commentCountLabel} 评论</span>}
-        </div>
+
+            <ZhihuRemarkEditButton author={detail.author} showLabel className="border border-haze/60 hover:border-sky-500/35" />
+            {detail.author.token && (
+              <button
+                type="button"
+                onClick={() => onNavigate({ kind: 'people', id: detail.author!.token ?? detail.author!.id })}
+                className="shrink-0 rounded-full border border-sky-500/35 bg-sky-500/10 px-3 py-1 font-sans text-[11.5px] font-medium text-sky-500 transition-colors hover:bg-sky-500/20 active:scale-95"
+              >
+                主页
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="mt-3 flex flex-wrap items-center gap-x-2.5 gap-y-1.5 text-[12px] text-paper-faint">
+            {refValue.kind !== 'answer' && voteCountLabel && <span>{voteCountLabel} 赞同</span>}
+            {refValue.kind !== 'answer' && commentCountLabel && <span>{commentCountLabel} 讨论</span>}
+          </div>
+        )}
 
         {refValue.kind !== 'answer' && (
           <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -776,7 +965,7 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
                 onClick={() => void toggleVote()}
                 aria-label={voteState === 'up' ? '取消赞同' : '赞同'}
                 title={!authenticated ? '登录后可赞同' : voteState === 'up' ? '取消赞同' : '赞同'}
-                className={`${actionClass} ${voteState === 'up' ? activeActionClass : ''}`}
+                className={`${actionClass} ${voteState === 'up' ? 'border-[#0066FF] bg-[#0066FF] text-white shadow-sm' : ''}`}
               >
                 <ThumbsUp size={14} strokeWidth={1.65} fill={voteState === 'up' ? 'currentColor' : 'none'} />
                 {voteCountLabel && <span>{voteCountLabel}</span>}
@@ -841,8 +1030,17 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
                 ref={proseRef}
                 className="reader-prose zhihu-prose text-paper"
                 data-article-lang="zh"
+                style={refValue.kind === 'answer' ? { touchAction: 'manipulation' } : undefined}
                 onClick={handleBodyClick}
-                dangerouslySetInnerHTML={{ __html: normalizedHtml }}
+                onDoubleClick={(event) => {
+                  if (refValue.kind !== 'answer' || guestLimited || commentsOpen || selectedSegment || lightbox || speedReadOpen) return
+                  const target = event.target instanceof Element ? event.target : null
+                  if (!target || target.closest('a, button, img, video, audio, iframe, input, textarea, [contenteditable], [data-segment-id]')) return
+                  if (window.getSelection()?.toString().trim()) return
+                  event.preventDefault()
+                  setCommentsOpen(true)
+                }}
+                dangerouslySetInnerHTML={normalizedHtmlMarkup}
               />
               <InlineArticleVideos
                 rootRef={proseRef}
@@ -925,8 +1123,26 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
           onUpVote={() => void toggleVote()}
           onDownVote={() => void toggleDownVote()}
           onOpenComments={() => setCommentsOpen(true)}
-          onPreviousAnswer={previousAnswerRef ? () => onReplaceNavigate(previousAnswerRef) : undefined}
-          onNextAnswer={nextAnswerRef ? () => onReplaceNavigate(nextAnswerRef) : undefined}
+          onPreviousAnswer={previousAnswerRef ? () => navigateToAnswer(previousAnswerRef) : undefined}
+          onNextAnswer={nextAnswerRef ? () => navigateToAnswer(nextAnswerRef) : undefined}
+        />
+      )}
+
+      {refValue.kind === 'answer' && !guestLimited && detail.questionId && (
+        <ZhihuAnswerContinuation
+          state={answerNavigationError || (nextAnswerRef && answerPreviewErrors[nextAnswerRef.id])
+            ? 'error'
+            : answerNavigationLoading || !resolvedAnswerNeighbors
+              ? 'loading'
+              : nextAnswerRef
+                ? 'ready'
+                : 'end'}
+          error={answerNavigationError ?? (nextAnswerRef ? answerPreviewErrors[nextAnswerRef.id] : undefined)}
+          onRetry={answerNavigationError
+            ? () => setAnswerNavigationAttempt((value) => value + 1)
+            : nextAnswerRef && answerPreviewErrors[nextAnswerRef.id]
+              ? () => setAnswerPreviewAttempt((value) => value + 1)
+              : undefined}
         />
       )}
 
@@ -983,7 +1199,7 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
           authenticated={authenticated}
           accountId={accountId}
           draftStore={commentDraftStore}
-          onOpenImage={(src, alt) => setLightbox({ src, alt })}
+          onOpenImage={(src, alt) => setLightbox({ items: [{ src, alt }], index: 0 })}
         />
       )}
 
@@ -999,7 +1215,7 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
           authenticated={authenticated}
           accountId={accountId}
           draftStore={commentDraftStore}
-          onOpenImage={(src, alt) => setLightbox({ src, alt })}
+          onOpenImage={(src, alt) => setLightbox({ items: [{ src, alt }], index: 0 })}
           variant="dialog"
         />
       </ZhihuAnswerCommentsDialog>
@@ -1094,7 +1310,7 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
                 authenticated={authenticated}
                 accountId={accountId}
                 draftStore={commentDraftStore}
-                onOpenImage={(src, alt) => setLightbox({ src, alt })}
+                onOpenImage={(src, alt) => setLightbox({ items: [{ src, alt }], index: 0 })}
               />
             </div>
           </div>
@@ -1103,8 +1319,13 @@ export function ZhihuContentScreen({ refValue, preview, contentService, feedServ
 
       {lightbox && (
         <ImageLightbox
-          src={lightbox.src}
-          alt={lightbox.alt}
+          {...lightbox.items[lightbox.index]}
+          items={lightbox.items}
+          index={lightbox.index}
+          total={lightbox.items.length}
+          onSelect={(index) => setLightbox((state) => state ? { ...state, index } : state)}
+          onPrevious={lightbox.index > 0 ? () => setLightbox((state) => state ? { ...state, index: state.index - 1 } : state) : undefined}
+          onNext={lightbox.index < lightbox.items.length - 1 ? () => setLightbox((state) => state ? { ...state, index: state.index + 1 } : state) : undefined}
           onClose={() => setLightbox(null)}
         />
       )}

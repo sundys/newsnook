@@ -1,4 +1,5 @@
 import { findSource, offsetPageRequest, userAgentFor, type NewsSource } from '../../src/sources/registry.ts'
+import { imageReferer } from '../../src/lib/imageProxy.ts'
 
 export interface EventContext<Env = unknown, Params extends string = any, Data = Record<string, unknown>> {
   request: Request
@@ -18,13 +19,16 @@ export type PagesFunction<
 
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+const BILIBILI_PAGE_HOST_RE = /(?:^|\.)bilibili\.com$/i
+const BILIBILI_ASSET_HOST_RE = /(?:^|\.)(?:hdslb\.com|bilivideo\.com)$/i
 
 function corsHeaders(): Headers {
   const headers = new Headers()
   headers.set('Access-Control-Allow-Origin', '*')
   headers.set('Access-Control-Allow-Methods', 'GET, POST, HEAD, OPTIONS')
-  headers.set('Access-Control-Allow-Headers', 'Content-Type, User-Agent, Authorization, Accept, Accept-Language')
+  headers.set('Access-Control-Allow-Headers', 'Content-Type, User-Agent, Authorization, Accept, Accept-Language, Range')
   headers.set('Access-Control-Max-Age', '86400')
+  headers.set('Access-Control-Expose-Headers', 'X-NewsNook-Upstream-Url')
   return headers
 }
 
@@ -40,7 +44,9 @@ function feedRequestHeaders(
     ...(source.requestHeaders ?? {}),
   }
   if (method === 'POST') {
-    headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
+    headers['Content-Type'] = source.requestBodyType === 'json'
+      ? 'application/json; charset=UTF-8'
+      : 'application/x-www-form-urlencoded; charset=UTF-8'
   }
   return headers
 }
@@ -82,7 +88,7 @@ export const onRequest: PagesFunction = async (context) => {
       const page = pageRaw != null && pageRaw !== '' ? Number(pageRaw) : 0
       const paged = Number.isFinite(page)
         ? offsetPageRequest(source, page)
-        : { url: source.url, requestForm: source.requestForm }
+        : { url: source.url, requestForm: source.requestForm, requestJson: source.requestJson }
 
       const method = (request.method || 'GET').toUpperCase()
       const wantPost = method === 'POST' || source.requestMethod === 'POST'
@@ -92,7 +98,11 @@ export const onRequest: PagesFunction = async (context) => {
         if (method === 'POST') {
           body = await request.text()
         }
-        if (!body) body = encodeFormBody(paged.requestForm ?? source.requestForm)
+        if (!body) {
+          body = source.requestBodyType === 'json'
+            ? JSON.stringify(paged.requestJson ?? source.requestJson ?? {})
+            : encodeFormBody(paged.requestForm ?? source.requestForm)
+        }
       }
 
       const headers = feedRequestHeaders(source, wantPost ? 'POST' : 'GET')
@@ -106,6 +116,7 @@ export const onRequest: PagesFunction = async (context) => {
       const respHeaders = corsHeaders()
       const contentType = upstream.headers.get('content-type')
       if (contentType) respHeaders.set('Content-Type', contentType)
+      respHeaders.set('X-NewsNook-Upstream-Url', upstream.url)
       respHeaders.set('Cache-Control', 'no-store')
 
       return new Response(upstream.body, {
@@ -124,21 +135,25 @@ export const onRequest: PagesFunction = async (context) => {
       const requestedAccept = url.searchParams.get('accept')
       const isNetease =
         target.includes('163.com') || target.includes('netease.com') || target.includes('126.net')
+      const isBilibiliPage = BILIBILI_PAGE_HOST_RE.test(targetUrl.hostname)
 
       const headers: Record<string, string> = {
-        'User-Agent': isNetease ? 'NewsApp' : requestedUa || BROWSER_UA,
+        'User-Agent': isNetease ? 'NewsApp' : isBilibiliPage ? BROWSER_UA : requestedUa || BROWSER_UA,
         Accept:
           requestedAccept ||
           'text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-        Referer: targetUrl.hostname.endsWith('.translate.goog')
-          ? 'https://translate.google.com/'
-          : `${targetUrl.origin}/`,
+        Referer: isBilibiliPage
+          ? 'https://www.bilibili.com/'
+          : targetUrl.hostname.endsWith('.translate.goog')
+            ? 'https://translate.google.com/'
+            : `${targetUrl.origin}/`,
       }
 
       const upstream = await fetch(target, { headers, redirect: 'follow' })
       const respHeaders = corsHeaders()
       respHeaders.set('Content-Type', upstream.headers.get('content-type') || 'text/html; charset=utf-8')
+      respHeaders.set('X-NewsNook-Upstream-Url', upstream.url)
       respHeaders.set('Cache-Control', 'no-store')
 
       return new Response(upstream.body, {
@@ -161,7 +176,7 @@ export const onRequest: PagesFunction = async (context) => {
           'User-Agent': requestedUa || BROWSER_UA,
           'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
           Accept: '*/*',
-          Referer: 'https://news.google.com/',
+          Referer: new URL(target).origin + '/',
         },
         body,
         redirect: 'follow',
@@ -169,6 +184,7 @@ export const onRequest: PagesFunction = async (context) => {
 
       const respHeaders = corsHeaders()
       respHeaders.set('Content-Type', upstream.headers.get('content-type') || 'text/plain; charset=utf-8')
+      respHeaders.set('X-NewsNook-Upstream-Url', upstream.url)
       respHeaders.set('Cache-Control', 'no-store')
 
       return new Response(upstream.body, {
@@ -185,28 +201,39 @@ export const onRequest: PagesFunction = async (context) => {
       const targetUrl = new URL(target)
       const isMedia = firstSegment === 'media'
       const requestedUa = url.searchParams.get('ua')
-      const isNetease =
-        target.includes('163.com') || target.includes('netease.com') || target.includes('126.net')
-      const isWechatImage =
-        !isMedia &&
-        /(?:^|\.)(?:mmbiz\.qpic\.cn|mmecoa\.qpic\.cn|qlogo\.cn)$/i.test(targetUrl.hostname)
-
+      const isNetease = /(?:^|\.)(?:163\.com|netease\.com|126\.net)$/i.test(targetUrl.hostname)
+      const isBilibiliAsset = BILIBILI_ASSET_HOST_RE.test(targetUrl.hostname)
+      if (!isMedia && isNetease && targetUrl.protocol === 'http:') targetUrl.protocol = 'https:'
       const headers: Record<string, string> = {
         'User-Agent': isNetease && !isMedia ? 'NewsApp' : requestedUa || BROWSER_UA,
         Accept: isMedia ? '*/*' : 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
         'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
       }
-      if (!isWechatImage) {
-        headers.Referer = isMedia && isNetease ? 'https://3g.163.com/' : `${targetUrl.origin}/`
-      }
+      const referer = isMedia
+        ? isNetease
+          ? 'https://3g.163.com/'
+          : isBilibiliAsset
+            ? 'https://www.bilibili.com/'
+            : `${targetUrl.origin}/`
+        : imageReferer(targetUrl.href)
+      if (referer) headers.Referer = referer
 
-      const upstream = await fetch(target, { headers, redirect: 'follow' })
+      const range = isMedia ? request.headers.get('Range') : null
+      if (range) headers.Range = range
+      const upstream = await fetch(targetUrl.href, { headers, redirect: 'follow' })
       const respHeaders = corsHeaders()
       respHeaders.set(
         'Content-Type',
         upstream.headers.get('content-type') || (isMedia ? 'application/octet-stream' : 'image/jpeg'),
       )
-      respHeaders.set('Cache-Control', 'public, max-age=3600')
+      respHeaders.set('Cache-Control', range || upstream.status === 206 ? 'no-store' : 'public, max-age=3600')
+      if (isMedia) {
+        for (const name of ['Content-Range', 'Accept-Ranges']) {
+          const value = upstream.headers.get(name)
+          if (value) respHeaders.set(name, value)
+        }
+        respHeaders.set('Access-Control-Expose-Headers', 'X-NewsNook-Upstream-Url, Content-Range, Accept-Ranges')
+      }
 
       return new Response(upstream.body, {
         status: upstream.status,

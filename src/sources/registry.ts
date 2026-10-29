@@ -18,6 +18,7 @@ export {
   SOURCE_GROUP_ORDER,
   SOURCE_GROUPS,
   type NewsSource,
+  type SourceDiscoveryMetadata,
   type PagingStrategy,
   type SourceGroup,
   type SourceKind,
@@ -27,6 +28,7 @@ export { SOURCES, WECHAT2RSS_BASE } from './registry/builtinSources'
 export { SITES, findSite, isSiteId } from './registry/sites'
 
 export {
+  canonicalSourceId,
   findSource,
   isCustomSourceId,
   isWechatAlbumUrl,

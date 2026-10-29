@@ -1,3 +1,4 @@
+import { readAppStyles } from './helpers/readAppStyles'
 /**
  * 视频全屏必须走原生藏栏；HTML requestFullscreen 在边到边 WebView 里只会让状态栏变透明浮层。
  * 用法：npx tsx scripts/native-fullscreen.test.ts
@@ -110,11 +111,15 @@ function clearBridge() {
     'utf8',
   )
   assert.match(plugin, /public void setVideoFullscreen\(PluginCall call\)/)
-  assert.match(plugin, /\(\(MainActivity\) activity\)\.setVideoFullscreen\(active\)/)
+  assert.match(plugin, /\(\(BrowserFullscreenHost\) activity\)\.setVideoFullscreen\(active\)/)
 
-  const css = readFileSync(join(process.cwd(), 'src/index.css'), 'utf8')
-  assert.match(css, /\.ink-video-top-chrome\s*\{[^}]*padding:\s*0\.5rem 0\.625rem 2rem/s)
-  assert.match(css, /\.ink-video-bottom-chrome\s*\{[^}]*padding:\s*3rem 1rem 0\.25rem/s)
+  const css = readAppStyles()
+  // Chrome V2 uses a narrower gradient and keeps symmetric side padding.
+  // Test the behavior rather than the old exact padding numbers.
+  assert.match(css, /\.ink-video-top-chrome\s*\{[^}]*padding:\s*9px 14px 23px/s)
+  assert.match(css, /\.ink-video-bottom-chrome\s*\{[^}]*padding:\s*27px 14px 9px/s)
+  assert.match(css, /\[data-video-fullscreen='true'\] \.ink-video-top-chrome\s*\{[^}]*--video-sat/s)
+  assert.match(css, /\[data-video-fullscreen='true'\] \.ink-video-bottom-chrome\s*\{[^}]*--video-sab/s)
   assert.doesNotMatch(player, /ink-video-top-chrome[^\n]*var\(--sal/)
 
   const capConfig = readFileSync(join(process.cwd(), 'capacitor.config.ts'), 'utf8')

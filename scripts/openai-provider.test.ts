@@ -472,3 +472,8 @@ assert.equal(dedupCalls, 2)
 globalThis.fetch = originalFetch
 
 console.log('openai-provider: ok')
+
+assert.equal(assertOpenAiConfig({ apiKey: 'k', endpoint: 'http://gateway.example.com:8317/v1/chat/completions', model: 'x', allowInsecureHttp: true }), 'http://gateway.example.com:8317/v1')
+for (const endpoint of ['ftp://gateway.example.com/v1', 'http://user:pass@gateway.example.com/v1', 'http://gateway.example.com/v1?token=a', 'http://gateway.example.com/v1#fragment']) {
+  assert.throws(() => assertOpenAiConfig({ apiKey: 'k', endpoint, model: 'x', allowInsecureHttp: true }), undefined, endpoint)
+}

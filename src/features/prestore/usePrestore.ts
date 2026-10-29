@@ -4,9 +4,11 @@ import { Capacitor } from '@capacitor/core'
 import { Network } from '@capacitor/network'
 
 import { log } from '../../lib/logger'
+import { withArticlePreviewImage } from '../../lib/articlePreview'
+import type { Article } from '../../lib/types'
 import type { Preferences } from '../../sources/preferences'
 import { buildPrestorePlan } from './model'
-import { syncPrestore, type PrestoreProgress } from './service'
+import type { PrestoreProgress } from './service'
 import {
   clearPrestore,
   emptyPrestoreSnapshot,
@@ -30,12 +32,15 @@ interface UsePrestoreArgs {
 export interface UsePrestoreResult {
   sourceCount: number
   snapshot: PrestoreSnapshot
+  /** Local filesystem restoration is complete, including an empty/offline result. */
+  restored: boolean
   articleIds: ReadonlySet<string>
   syncing: boolean
   progress: PrestoreProgress | null
   error: string | null
   syncNow: () => void
   clear: () => Promise<void>
+  updateArticlePreview: (article: Article) => void
 }
 
 async function networkAvailable(): Promise<boolean> {
@@ -61,6 +66,7 @@ export function usePrestore({
     [enabledIds, prefs, presetId],
   )
   const [snapshot, setSnapshot] = useState<PrestoreSnapshot>(emptyPrestoreSnapshot)
+  const [restored, setRestored] = useState(false)
   const [syncing, setSyncing] = useState(false)
   const [progress, setProgress] = useState<PrestoreProgress | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -79,6 +85,10 @@ export function usePrestore({
     let disposed = false
     void loadPrestoreSnapshot().then((next) => {
       if (!disposed) setSnapshot(next)
+    }).catch(error => {
+      log.storage.warn('Prestore snapshot restore failed', error)
+    }).finally(() => {
+      if (!disposed) setRestored(true)
     })
     return () => {
       disposed = true
@@ -91,6 +101,17 @@ export function usePrestore({
 
   const syncNow = useCallback(() => {
     setManualTriggerSequence((sequence) => sequence + 1)
+  }, [])
+
+  const updateArticlePreview = useCallback((article: Article) => {
+    setSnapshot((previous) => {
+      const articles = previous.articles.map((item) => item.id === article.id
+        ? withArticlePreviewImage(item, '', article.image)
+        : item)
+      return articles.some((item, index) => item !== previous.articles[index])
+        ? { ...previous, articles }
+        : previous
+    })
   }, [])
 
   useEffect(() => {
@@ -194,6 +215,10 @@ export function usePrestore({
       lastProgressSourceRef.current = ''
 
       try {
+        // Keep expensive feed parsers and article extractors out of the home
+        // screen's first module graph. The service is only needed for a real sync.
+        const { syncPrestore } = await import('./service')
+        if (controller.signal.aborted) return
         await syncPrestore({
           plan,
           perSourceLimit: prefs.prestore.perSourceLimit,
@@ -272,11 +297,13 @@ export function usePrestore({
   return {
     sourceCount: plan.sources.length,
     snapshot,
+    restored,
     articleIds: snapshot.articleIds,
     syncing,
     progress,
     error,
     syncNow,
     clear,
+    updateArticlePreview,
   }
 }

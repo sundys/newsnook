@@ -35,6 +35,8 @@ import {
   parseWscnLive,
 } from './parseFeed/finance'
 import { parseWechatSource } from './parseFeed/wechat'
+import { parseInfzm, parseThePaper } from './parseFeed/deepChinese'
+import { parseBbcChinese, parseZaobao } from './parseFeed/international'
 
 export {
   enrichJazzyearDates,
@@ -48,6 +50,13 @@ export {
 export { neteasePageEntryCount } from './parseFeed/netease'
 export { zhihuEditionDate } from './parseFeed/zhihu'
 export { cleanWechatArticleHtml } from './parseFeed/wechat'
+export {
+  parseThePaperCursor,
+  thePaperCursor,
+  thePaperCursorAdvances,
+  thePaperPageRequest,
+  type ThePaperCursor,
+} from './parseFeed/deepChinese'
 
 function parseWebCatalog(source: NewsSource, payload: string, fetchedAt: number): Article[] {
   return catalogHtmlToArticles(source, payload, fetchedAt)
@@ -84,6 +93,10 @@ const PARSERS: Record<SourceKind, SourceParser> = {
   paulgraham: parsePaulGraham,
   wechat: parseWechatSource,
   uisdc: parseUisdcTag,
+  thepaper: parseThePaper,
+  infzm: parseInfzm,
+  zaobao: parseZaobao,
+  'bbc-chinese': parseBbcChinese,
   'claude-webflow': parseClaudeWebflow,
   'claude-academy': parseClaudeAcademy,
   'openai-cookbook': parseOpenaiCookbook,

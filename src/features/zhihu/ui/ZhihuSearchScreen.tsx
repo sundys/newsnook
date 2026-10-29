@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import type { FormEvent, MutableRefObject, ReactNode } from 'react'
 import { ArrowUpDown, ChevronDown, Clock3, FileText, Hash, Search, UserRound, X } from 'lucide-react'
 
@@ -12,7 +12,7 @@ import type {
   ZhihuSearchTimeRange,
 } from '../api/endpoints'
 import type { ZhihuFeedService } from '../feed/service'
-import type { ZhihuContentSummary, ZhihuEntityRef } from '../types'
+import type { ZhihuContentSummary, ZhihuEntityRef, ZhihuSearchState } from '../types'
 import {
   ZhihuContentRow,
   ZhihuEmptyState,
@@ -23,9 +23,11 @@ import {
 
 interface Props {
   initialQuery: string
+  initialState?: ZhihuSearchState
   service: ZhihuFeedService
-  onQueryChange: (query: string) => void
-  onOpen: (ref: ZhihuEntityRef) => void
+  onQueryChange: (query: string, state: ZhihuSearchState) => void
+  onStateChange?: (state: ZhihuSearchState) => void
+  onOpen: (ref: ZhihuEntityRef, state: ZhihuSearchState) => void
   restrictedMemberHashId?: string
   restrictedMemberName?: string
   onClearRestriction?: () => void
@@ -61,45 +63,67 @@ function FilterChip({ icon, label, onClick }: { icon: ReactNode; label: string; 
     <button
       type="button"
       onClick={onClick}
-      className="flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-haze/80 bg-ink-raised/60 px-3 text-[11px] text-paper-muted transition-colors hover:border-paper-faint/50 hover:bg-ink-raised hover:text-paper"
+      className="flex h-8 shrink-0 items-center gap-1.5 rounded-full border border-haze/60 bg-ink-raised/50 px-3.5 text-[11.5px] font-medium text-paper-muted transition-colors hover:border-sky-500/40 hover:bg-ink-raised hover:text-sky-500 active:scale-95"
     >
       <span className="text-paper-faint">{icon}</span>
       <span>{label}</span>
-      <ChevronDown size={12} strokeWidth={1.6} className="text-paper-faint" />
+      <ChevronDown size={12} strokeWidth={1.8} className="text-paper-faint" />
     </button>
   )
 }
 
+
 export function ZhihuSearchScreen({
   initialQuery,
+  initialState,
   service,
   onQueryChange,
+  onStateChange,
   onOpen,
   restrictedMemberHashId,
   restrictedMemberName,
   onClearRestriction,
   scrollContainerRef,
 }: Props) {
-  const [input, setInput] = useState(initialQuery)
-  const [query, setQuery] = useState(initialQuery)
-  const [tab, setTab] = useState<ZhihuSearchTab>('general')
-  const [sort, setSort] = useState<ZhihuSearchSort>('default')
-  const [contentType, setContentType] = useState<ZhihuSearchContentType>('all')
-  const [timeRange, setTimeRange] = useState<ZhihuSearchTimeRange>('all')
-  const [items, setItems] = useState<ZhihuContentSummary[]>([])
-  const [nextCursor, setNextCursor] = useState<string | undefined>()
+  const [input, setInput] = useState(initialState?.input ?? initialQuery)
+  const [query, setQuery] = useState(initialState?.query ?? initialQuery)
+  const [tab, setTab] = useState<ZhihuSearchTab>(initialState?.tab ?? 'general')
+  const [sort, setSort] = useState<ZhihuSearchSort>(initialState?.sort ?? 'default')
+  const [contentType, setContentType] = useState<ZhihuSearchContentType>(initialState?.contentType ?? 'all')
+  const [timeRange, setTimeRange] = useState<ZhihuSearchTimeRange>(initialState?.timeRange ?? 'all')
+  const [items, setItems] = useState<ZhihuContentSummary[]>(initialState?.items ?? [])
+  const [nextCursor, setNextCursor] = useState<string | undefined>(initialState?.nextCursor)
   const [loading, setLoading] = useState(false)
   const [loadingMore, setLoadingMore] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [picker, setPicker] = useState<'sort' | 'content' | 'time' | null>(null)
   const epoch = useRef(0)
   const sentinelRef = useRef<HTMLDivElement>(null)
+  const skipRestoredSearchRef = useRef(Boolean(initialState))
+  const searchState = useMemo<ZhihuSearchState>(() => ({
+    input,
+    query,
+    tab,
+    sort,
+    contentType,
+    timeRange,
+    items,
+    nextCursor,
+  }), [contentType, input, items, nextCursor, query, sort, tab, timeRange])
+
+  useEffect(() => {
+    onStateChange?.(searchState)
+  }, [onStateChange, searchState])
 
   useEffect(() => {
     if (!query.trim()) {
       setItems([])
       setNextCursor(undefined)
       setError(null)
+      return
+    }
+    if (skipRestoredSearchRef.current) {
+      skipRestoredSearchRef.current = false
       return
     }
     const request = ++epoch.current
@@ -132,8 +156,12 @@ export function ZhihuSearchScreen({
   const submit = (event: FormEvent) => {
     event.preventDefault()
     const next = input.trim()
+    const nextState = { ...searchState, input: next, query: next, items: [], nextCursor: undefined }
+    setInput(next)
     setQuery(next)
-    onQueryChange(next)
+    setItems([])
+    setNextCursor(undefined)
+    onQueryChange(next, nextState)
   }
 
   const loadMore = () => {
@@ -184,12 +212,12 @@ export function ZhihuSearchScreen({
   return (
     <div className="mx-auto w-full max-w-3xl px-4 pb-28 pt-4 sm:px-6">
       <form onSubmit={submit} className="flex items-center gap-2">
-        <label className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5 rounded-xl border border-haze bg-ink-raised/60 px-3.5 transition-colors focus-within:border-cinnabar/45 focus-within:bg-ink-raised">
-          <Search size={15} strokeWidth={1.7} className="shrink-0 text-paper-muted" />
+        <label className="flex min-h-11 min-w-0 flex-1 items-center gap-2.5 rounded-full border border-haze/60 bg-ink-raised/50 px-4 transition-[border-color,background-color] focus-within:border-sky-500/50 focus-within:bg-ink-raised/80">
+          <Search size={15} strokeWidth={2} className="shrink-0 text-sky-500" />
           <input
             value={input}
             onChange={(event) => setInput(event.target.value)}
-            placeholder="搜索知乎"
+            placeholder="搜索知乎内容、问题、答主…"
             autoFocus={!initialQuery}
             className="min-w-0 flex-1 bg-transparent text-[13.5px] text-paper outline-none placeholder:text-paper-faint/70"
           />
@@ -198,7 +226,7 @@ export function ZhihuSearchScreen({
               type="button"
               onClick={() => setInput('')}
               aria-label="清空搜索"
-              className="flex size-7 shrink-0 items-center justify-center rounded-lg text-paper-faint hover:bg-paper/5 hover:text-paper"
+              className="flex size-7 shrink-0 items-center justify-center rounded-full text-paper-faint hover:bg-paper/5 hover:text-paper"
             >
               <X size={14} />
             </button>
@@ -208,9 +236,9 @@ export function ZhihuSearchScreen({
           type="submit"
           aria-label="搜索"
           title="搜索"
-          className="flex size-11 shrink-0 items-center justify-center rounded-xl border border-cinnabar/45 bg-cinnabar/12 text-cinnabar-soft transition-colors hover:bg-cinnabar/20"
+          className="flex size-11 shrink-0 items-center justify-center rounded-full bg-[#0066FF] text-white shadow-sm transition-[background-color,transform] hover:bg-[#005ce6] active:scale-95"
         >
-          <Search size={17} strokeWidth={1.8} />
+          <Search size={17} strokeWidth={2} />
         </button>
       </form>
 
@@ -269,7 +297,7 @@ export function ZhihuSearchScreen({
       {items.length > 0 && (
         <ZhihuSurface className="mt-3 divide-y divide-haze/55">
           {items.map((item) => (
-            <ZhihuContentRow key={`${item.ref.kind}:${item.ref.id}`} item={item} onOpen={(value) => onOpen(value.ref)} showReason={false} />
+            <ZhihuContentRow key={`${item.ref.kind}:${item.ref.id}`} item={item} onOpen={(value) => onOpen(value.ref, searchState)} showReason={false} />
           ))}
         </ZhihuSurface>
       )}

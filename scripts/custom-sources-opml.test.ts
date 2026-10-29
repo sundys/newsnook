@@ -24,10 +24,25 @@ import {
   normalizePreferences,
   sourceIdsForCategoryWithPrefs,
   updateCustomSource,
+  renameSource,
 } from '../src/sources/preferences'
 import { SOURCES, findSource } from '../src/sources/registry'
 
 console.log('Testing Custom Sources & OPML Import/Export Lifecycle...')
+
+const builtin = SOURCES.find((source) => !source.workspaceOnly)!
+const originalBuiltinName = builtin.name
+const renamedBuiltin = normalizePreferences(renameSource(DEFAULT_PREFERENCES, builtin.id, '  自定义显示名称  '))
+const displayedBuiltin = allRegisteredSources(renamedBuiltin).find((source) => source.id === builtin.id)!
+assert.equal(displayedBuiltin.name, '自定义显示名称')
+assert.equal(displayedBuiltin.url, builtin.url)
+assert.equal(builtin.name, originalBuiltinName)
+assert.equal(renameSource(renamedBuiltin, builtin.id, '  '), renamedBuiltin)
+const customDraft = addCustomSource(DEFAULT_PREFERENCES, { name: '原始名称', url: 'https://example.com/rename-feed' })
+const renamedCustom = normalizePreferences(renameSource(customDraft.nextPrefs, customDraft.newSourceId, '新名称'))
+assert.equal(renamedCustom.customSources?.[0].name, '新名称')
+assert.equal(renamedCustom.customSources?.[0].label, '新名称')
+assert.equal(renamedCustom.customSources?.[0].url, 'https://example.com/rename-feed')
 
 // 1. Initial State
 assert.equal(DEFAULT_PREFERENCES.customSources?.length ?? 0, 0)
@@ -79,6 +94,26 @@ const updatedPrefs = updateCustomSource(prefsWithSource, newSourceId, {
 assert.equal(updatedPrefs.customSources?.[0].name, '阮一峰博客')
 assert.equal(updatedPrefs.customSources?.[0].label, '阮博客')
 assert.equal(updatedPrefs.customSources?.[0].url, 'https://feed.ruanyifeng.com/atom.xml')
+
+// RSSHub source identity and fallback metadata survive renaming, but never
+// follow a changed URL without a newly verified route.
+const hubMetadata = {
+  generator: 'rsshub' as const, providerId: 'rsshub', entryId: 'rsshub:logical:/jike/user/123',
+  routeKey: '/jike/user/123', instanceId: 'stsecurity',
+  verification: { status: 'verified' as const, checkedAt: 123 },
+}
+const hub = addCustomSource(DEFAULT_PREFERENCES, {
+  name: '即刻订阅', url: 'https://rsshub.stsecurity.moe/jike/user/123', discovery: hubMetadata,
+})
+const renamedHub = updateCustomSource(hub.nextPrefs, hub.newSourceId, { name: '新名称' })
+assert.deepEqual(renamedHub.customSources?.[0].discovery, hubMetadata, 'rename keeps RSSHub instance and route')
+const movedHub = updateCustomSource(hub.nextPrefs, hub.newSourceId, { url: 'https://example.com/atom.xml' })
+assert.equal(movedHub.customSources?.[0].discovery, undefined, 'edited URL cannot retain stale RSSHub route')
+const reboundHub = updateCustomSource(hub.nextPrefs, hub.newSourceId, {
+  url: 'https://rsshub.cups.moe/jike/user/123',
+  discovery: { ...hubMetadata, instanceId: 'cups' },
+})
+assert.equal(reboundHub.customSources?.[0].discovery?.instanceId, 'cups', 're-verified URL keeps new instance metadata')
 
 // 4. Persistence & Normalization roundtrip
 const serialized = JSON.stringify(updatedPrefs)

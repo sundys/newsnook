@@ -1,3 +1,4 @@
+import { readAppStyles } from './helpers/readAppStyles'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -91,7 +92,7 @@ assert.ok(Math.abs(zoomedPan.x - 311.111) < 0.01)
 assert.equal(zoomedPan.y, -200)
 
 {
-  const css = readFileSync(join(process.cwd(), 'src/index.css'), 'utf8')
+  const css = readAppStyles()
   assert.match(
     css,
     /\.ink-video-abs-center\s*\{[^}]*transform:\s*translate\(-50%,\s*-50%\)/,
@@ -101,7 +102,7 @@ assert.equal(zoomedPan.y, -200)
     join(process.cwd(), 'src/components/InkVideoPlayer.tsx'),
     'utf8',
   )
-  const playButton = player.slice(player.indexOf('aria-label="播放"'))
+  const playButton = player.slice(player.indexOf("aria-label={playing ? '暂停' : '播放'}"))
   assert.match(playButton.slice(0, 900), /ink-video-abs-center/)
   assert.doesNotMatch(
     playButton.slice(0, 900),

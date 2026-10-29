@@ -193,7 +193,7 @@ export function StorageScreen({ laterCount: _laterCount, usage, prestore, onCach
 
       <PrestoreControls prestore={prestore} />
 
-      <SettingsSection title="缓存用量">
+      <SettingsSection variant="plain" title="缓存用量">
         <ul className="divide-y divide-haze border-y border-haze">
           <CacheRow
             icon={Cloud}
@@ -256,7 +256,7 @@ export function StorageScreen({ laterCount: _laterCount, usage, prestore, onCach
       <ConfirmDialog
         open={confirmClearAll}
         title="清除全部缓存？"
-        message="将清除预存正文、普通离线正文和列表缓存。稍后读标题会保留，但其正文需要联网重新下载。"
+        message="将清除预存正文、普通离线正文和列表缓存。稍后读标题与已订阅 Feed 会保留。"
         confirmLabel="清除"
         danger
         onCancel={() => setConfirmClearAll(false)}

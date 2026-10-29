@@ -11,6 +11,7 @@ import { ProxyAgent, fetch as undiciFetch } from 'undici'
 import { SocksProxyAgent } from 'socks-proxy-agent'
 
 import { normalizeProxyPrefs } from './src/features/proxy/config.ts'
+import { imageReferer } from './src/lib/imageProxy.ts'
 import { planNodeUpstream } from './src/features/proxy/nodeAgent.ts'
 import type { ProxyPrefs } from './src/features/proxy/types.ts'
 import { type NewsSource } from './src/sources/registry.ts'
@@ -28,6 +29,8 @@ function buildStamp(): string {
 
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36'
+const BILIBILI_PAGE_HOST_RE = /(?:^|\.)bilibili\.com$/i
+const BILIBILI_ASSET_HOST_RE = /(?:^|\.)(?:hdslb\.com|bilivideo\.com)$/i
 
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308])
 
@@ -55,8 +58,10 @@ function isTlsCertError(error: unknown): boolean {
 }
 
 type UpstreamResult = {
+  finalUrl?: string
   status: number
   contentType: string | null
+  rangeHeaders: Record<string, string>
   buffer: Buffer
 }
 
@@ -110,7 +115,12 @@ function fetchInsecure(
           const contentType = res.headers['content-type']
           resolve({
             status,
+            finalUrl: target,
             contentType: typeof contentType === 'string' ? contentType : null,
+            rangeHeaders: Object.fromEntries(['content-range', 'accept-ranges'].flatMap(name => {
+              const value = res.headers[name]
+              return typeof value === 'string' ? [[name, value]] : []
+            })),
             buffer: Buffer.concat(chunks),
           })
         })
@@ -146,7 +156,12 @@ async function fetchViaProxyUri(
     })
     return {
       status: upstream.status,
+      finalUrl: upstream.url,
       contentType: upstream.headers.get('content-type'),
+      rangeHeaders: Object.fromEntries(['content-range', 'accept-ranges'].flatMap(name => {
+        const value = upstream.headers.get(name)
+        return value ? [[name, value]] : []
+      })),
       buffer: Buffer.from(await upstream.arrayBuffer()),
     }
   } finally {
@@ -161,7 +176,8 @@ async function fetchUpstream(target: string, request: UpstreamRequest): Promise<
 
   try {
     if (proxyUri) {
-      return await fetchViaProxyUri(fetchUrl, request, proxyUri)
+      const response = await fetchViaProxyUri(fetchUrl, request, proxyUri)
+      return { ...response, finalUrl: fetchUrl === target ? response.finalUrl : undefined }
     }
 
     const upstream = await fetch(fetchUrl, {
@@ -172,7 +188,12 @@ async function fetchUpstream(target: string, request: UpstreamRequest): Promise<
     })
     return {
       status: upstream.status,
+      finalUrl: fetchUrl === target ? upstream.url : undefined,
       contentType: upstream.headers.get('content-type'),
+      rangeHeaders: Object.fromEntries(['content-range', 'accept-ranges'].flatMap(name => {
+        const value = upstream.headers.get(name)
+        return value ? [[name, value]] : []
+      })),
       buffer: Buffer.from(await upstream.arrayBuffer()),
     }
   } catch (error) {
@@ -180,12 +201,14 @@ async function fetchUpstream(target: string, request: UpstreamRequest): Promise<
     if (proxyUri?.startsWith('socks')) {
       const agent = new SocksProxyAgent(proxyUri)
       try {
-        return await fetchInsecure(fetchUrl, request, 8, agent as http.Agent)
+        const result = await fetchInsecure(fetchUrl, request, 8, agent as http.Agent)
+        return { ...result, finalUrl: fetchUrl === target ? result.finalUrl : undefined }
       } finally {
         agent.destroy()
       }
     }
-    return fetchInsecure(fetchUrl, request)
+    const result = await fetchInsecure(fetchUrl, request)
+    return { ...result, finalUrl: fetchUrl === target ? result.finalUrl : undefined }
   }
 }
 
@@ -221,7 +244,9 @@ function feedRequestHeaders(
     ...(source.requestHeaders ?? {}),
   }
   if (method === 'POST') {
-    headers['Content-Type'] = 'application/x-www-form-urlencoded; charset=UTF-8'
+    headers['Content-Type'] = source.requestBodyType === 'json'
+      ? 'application/json; charset=UTF-8'
+      : 'application/x-www-form-urlencoded; charset=UTF-8'
   }
   return headers
 }
@@ -250,7 +275,11 @@ function feedProxyPlugin(): Plugin {
             offsetPageRequest: (
               source: NewsSource,
               page: number,
-            ) => { url: string; requestForm?: Record<string, string | number> }
+            ) => {
+              url: string
+              requestForm?: Record<string, string | number>
+              requestJson?: Record<string, unknown>
+            }
           }
           const source = registry.findSource(match[1])
           if (!source) {
@@ -264,7 +293,7 @@ function feedProxyPlugin(): Plugin {
           const page = pageRaw != null && pageRaw !== '' ? Number(pageRaw) : 0
           const paged = Number.isFinite(page)
             ? registry.offsetPageRequest(source, page)
-            : { url: source.url, requestForm: source.requestForm }
+            : { url: source.url, requestForm: source.requestForm, requestJson: source.requestJson }
 
           const method = (req.method ?? 'GET').toUpperCase()
           const wantPost = method === 'POST' || source.requestMethod === 'POST'
@@ -274,7 +303,11 @@ function feedProxyPlugin(): Plugin {
             if (method === 'POST') {
               body = await readRequestBody(req)
             }
-            if (!body) body = encodeFormBody(paged.requestForm ?? source.requestForm)
+            if (!body) {
+              body = source.requestBodyType === 'json'
+                ? JSON.stringify(paged.requestJson ?? source.requestJson ?? {})
+                : encodeFormBody(paged.requestForm ?? source.requestForm)
+            }
           }
 
           const headers = feedRequestHeaders(source, wantPost ? 'POST' : 'GET', registry.userAgentFor)
@@ -285,6 +318,7 @@ function feedProxyPlugin(): Plugin {
             sourceMeta: { id: source.id, group: source.group },
           })
 
+          if (upstream.finalUrl) res.setHeader('X-NewsNook-Upstream-Url', upstream.finalUrl)
           res.statusCode = upstream.status
           res.setHeader(
             'Content-Type',
@@ -375,10 +409,12 @@ function upstreamProxy(): Plugin {
           const isPost = incoming.pathname === '/api/post' || req.url.startsWith('/api/post?')
           const isImage = incoming.pathname === '/api/image' || req.url.startsWith('/api/image?')
           const isMedia = incoming.pathname === '/api/media' || req.url.startsWith('/api/media?')
-          const isNetease =
-            target.includes('163.com') ||
-            target.includes('netease.com') ||
-            target.includes('126.net')
+          const isNetease = /(?:^|\.)(?:163\.com|netease\.com|126\.net)$/i.test(
+            targetUrl.hostname,
+          )
+          const isBilibiliPage = BILIBILI_PAGE_HOST_RE.test(targetUrl.hostname)
+          const isBilibiliAsset = BILIBILI_ASSET_HOST_RE.test(targetUrl.hostname)
+          if (isImage && isNetease && targetUrl.protocol === 'http:') targetUrl.protocol = 'https:'
 
           if (isPost) {
             const body = await readRequestBody(req)
@@ -388,10 +424,11 @@ function upstreamProxy(): Plugin {
                 'User-Agent': requestedUa || BROWSER_UA,
                 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8',
                 Accept: '*/*',
-                Referer: 'https://news.google.com/',
+                Referer: new URL(target).origin + '/',
               },
               body,
             })
+            if (upstream.finalUrl) res.setHeader('X-NewsNook-Upstream-Url', upstream.finalUrl)
             res.statusCode = upstream.status
             res.setHeader(
               'Content-Type',
@@ -403,13 +440,16 @@ function upstreamProxy(): Plugin {
             return
           }
 
-          // 微信图床：带他站 / localhost Referer 会返回「未经允许不可引用」占位图；不传 Referer 即可
-          const isWechatImage =
-            isImage &&
-            /(?:^|\.)(?:mmbiz\.qpic\.cn|mmecoa\.qpic\.cn|qlogo\.cn)$/i.test(targetUrl.hostname)
           // 网易 flv CDN：带 localhost Origin 会 403，代理侧不传 Origin，只带站点 Referer
           const headers: Record<string, string> = {
-            'User-Agent': isNetease && !isMedia ? 'NewsApp' : requestedUa || BROWSER_UA,
+            // Bilibili server-side page fetch with a mobile UA is less stable and may return
+            // a challenge/H5 shell. Use the same desktop browser UA as its official web player.
+            'User-Agent':
+              isNetease && !isMedia
+                ? 'NewsApp'
+                : isBilibiliPage
+                  ? BROWSER_UA
+                  : requestedUa || BROWSER_UA,
             Accept: isImage
               ? 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8'
               : isMedia
@@ -418,22 +458,31 @@ function upstreamProxy(): Plugin {
                   'text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8',
             'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
           }
-          if (!isWechatImage) {
-            headers.Referer =
-              isMedia && isNetease
-                ? 'https://3g.163.com/'
+          const referer = isImage
+            ? imageReferer(targetUrl.href)
+            : isNetease
+              ? isMedia ? 'https://3g.163.com/' : 'https://www.163.com/'
+              : isBilibiliPage || isBilibiliAsset
+                ? 'https://www.bilibili.com/'
                 : targetUrl.hostname.endsWith('.translate.goog')
                   ? 'https://translate.google.com/'
                   : `${targetUrl.origin}/`
-          }
+          if (referer) headers.Referer = referer
 
-          const upstream = await fetchUpstream(target, { headers })
+          const range = isMedia ? req.headers.range : undefined
+          if (range) headers.Range = range
+          const upstream = await fetchUpstream(targetUrl.href, { headers })
+          if (upstream.finalUrl) res.setHeader('X-NewsNook-Upstream-Url', upstream.finalUrl)
           res.statusCode = upstream.status
           const contentType =
             upstream.contentType ||
             (isImage ? 'image/jpeg' : isMedia ? 'application/octet-stream' : 'text/html; charset=utf-8')
           res.setHeader('Content-Type', contentType)
-          res.setHeader('Cache-Control', isImage || isMedia ? 'public, max-age=3600' : 'no-store')
+          res.setHeader('Cache-Control', (isImage || isMedia) && !range && upstream.status !== 206 ? 'public, max-age=3600' : 'no-store')
+          if (isMedia) {
+            for (const [name, value] of Object.entries(upstream.rangeHeaders)) res.setHeader(name, value)
+            res.setHeader('Access-Control-Expose-Headers', 'X-NewsNook-Upstream-Url, Content-Range, Accept-Ranges')
+          }
           res.setHeader('Access-Control-Allow-Origin', '*')
           res.end(upstream.buffer)
         } catch (error) {
@@ -636,11 +685,10 @@ function unlayerCssPlugin(): Plugin {
             code: Buffer.from(res.css),
             targets: { chrome: 69 << 16 },
           })
-          // lightningcss 无法降级含 var() 的 color-mix，最终扫一遍兜底
+          // Lower known theme colors; preserve other complete color-mix expressions.
+          // A regex ending at the first ')' corrupts nested var() values and can
+          // discard valid modern-browser styling or break final CSS compression.
           let css = colorMixToRgb(lowered.code.toString())
-            .replace(/color-mix\([^)]*\)/g, (m) => {
-              return m.includes('var(') ? 'transparent' : m
-            })
 
           // Flex gap polyfill: Chrome < 84 不支持 flex gap。
           // 为每个 .gap-* utility 追加精确的 margin fallback。
@@ -675,7 +723,7 @@ function unlayerCssPlugin(): Plugin {
 
           // lightningcss 不降级 :where()（Chrome 88+）；剥离 @property 后部分
           // Android WebView 又匹配不到 Tailwind 的 @supports 变量兜底 → divide-y 等失效
-          file.source = applyWebViewCssCompat(css)
+          file.source = applyWebViewCssCompat(css, { minify: true })
         }
       }
     },
@@ -695,6 +743,58 @@ export default defineConfig({
   define: {
     __APP_VERSION__: JSON.stringify(appVersion),
     __APP_BUILD__: JSON.stringify(buildStamp()),
+  },
+  server: {
+    watch: {
+      ignored: [
+        '**/android/**',
+        '**/third-party/**',
+        '**/iosapp/**',
+        '**/dist/**',
+        '**/cloud/**',
+        '**/.gradle/**',
+        '**/build/**',
+        '**/reports/**',
+        '**/artifacts/**',
+        '**/evidence/**',
+        '**/logs/**',
+        '**/promo-video/**',
+        '**/video/**',
+        '**/.superpowers/**',
+        '**/.worktrees/**',
+        '**/.cxx/**',
+        '**/coverage/**',
+        '**/.git/**',
+      ],
+    },
+    warmup: {
+      clientFiles: [
+        './src/main.tsx',
+        './src/App.tsx',
+        './src/index.css',
+      ],
+    },
+  },
+  optimizeDeps: {
+    entries: ['index.html'],
+    include: [
+      'react',
+      'react-dom',
+      'react-dom/client',
+      'react/jsx-dev-runtime',
+      'lucide-react',
+      'animejs',
+      'dompurify',
+      'marked',
+      'driver.js',
+      'opencc-js',
+      'fast-xml-parser',
+      '@mozilla/readability',
+      'linkedom',
+      'hls.js',
+      'dashjs',
+      'html-to-image',
+    ],
   },
   build: {
     target: ['chrome69', 'es2020'],

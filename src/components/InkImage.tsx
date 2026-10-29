@@ -1,4 +1,5 @@
 import { memo, useCallback, useEffect, useRef, useState } from 'react'
+import { Capacitor } from '@capacitor/core'
 
 import { resolvePlayableImageSrc, revokeBlobUrl } from '../features/proxy/hydrateImages'
 import {
@@ -6,6 +7,13 @@ import {
   deferredHostLabel,
   type DeferredHostPhase,
 } from '../lib/deferReaderMedia'
+import {
+  imageProxyUrl,
+  imageReferer,
+  initialListImageUrl,
+  isNeteaseImageUrl,
+  normalizeListImageUrl,
+} from '../lib/imageProxy'
 
 type LoadState = 'loading' | 'loaded' | 'error'
 
@@ -18,6 +26,8 @@ interface Props {
   eager?: boolean
   /** 加载失败时是否整块收起；默认保留一块安静的底色 */
   collapseOnError?: boolean
+  /** 直连及代理/原生重试均失败时通知列表，按需寻找替代封面。 */
+  onFailed?: () => void
   /** 点击看大图；提供后容器可聚焦并可键盘激活 */
   onOpen?: (src: string) => void
   /** 未允许前不设 src；点击占位后再加载 */
@@ -39,16 +49,25 @@ const InkImageFrame = memo(function InkImageFrame({
   className = '',
   eager,
   collapseOnError,
+  onFailed,
   onOpen,
   deferLoad,
 }: Props & { src: string }) {
+  const native = Capacitor.isNativePlatform()
+  const normalizedSrc = normalizeListImageUrl(src)
+  const initialPlayable = initialListImageUrl(src, native)
   const [phase, setPhase] = useState<DeferredHostPhase | 'loaded'>(deferLoad ? 'idle' : 'loading')
-  const [playable, setPlayable] = useState(src)
+  const [playable, setPlayable] = useState(initialPlayable)
   const [state, setState] = useState<LoadState>('loading')
   const ownedBlobRef = useRef<string | null>(null)
+  const retryAttemptedRef = useRef(false)
+  const failureNotifiedRef = useRef(false)
+  const mountedRef = useRef(true)
 
   useEffect(() => {
+    mountedRef.current = true
     return () => {
+      mountedRef.current = false
       revokeBlobUrl(ownedBlobRef.current)
       ownedBlobRef.current = null
     }
@@ -70,7 +89,10 @@ const InkImageFrame = memo(function InkImageFrame({
       setPhase('timeout')
     }, DEFERRED_LOAD_TIMEOUT_MS)
 
-    void resolvePlayableImageSrc(src)
+    void resolvePlayableImageSrc(initialPlayable, {
+      forceNative: native && isNeteaseImageUrl(normalizedSrc),
+      referer: imageReferer(normalizedSrc),
+    })
       .then((url) => {
         resolved = url
         if (cancelled) {
@@ -110,7 +132,7 @@ const InkImageFrame = memo(function InkImageFrame({
       probe.src = ''
       if (!handedOff && resolved && resolved !== ownedBlobRef.current) revokeBlobUrl(resolved)
     }
-  }, [deferLoad, phase, src])
+  }, [deferLoad, initialPlayable, native, normalizedSrc, phase])
 
   const attach = useCallback((node: HTMLImageElement | null) => {
     if (!node || !node.complete) return
@@ -127,6 +149,56 @@ const InkImageFrame = memo(function InkImageFrame({
     if (phase === 'loading') return
     setPhase('loading')
     setState('loading')
+  }
+
+  const finishWithError = () => {
+    if (!mountedRef.current) return
+    setState('error')
+    setPhase('failed')
+    if (!failureNotifiedRef.current) {
+      failureNotifiedRef.current = true
+      onFailed?.()
+    }
+  }
+
+  const retryAfterError = () => {
+    if (retryAttemptedRef.current || !normalizedSrc.startsWith('http')) {
+      finishWithError()
+      return
+    }
+    retryAttemptedRef.current = true
+    setState('loading')
+
+    if (!native) {
+      const proxied = imageProxyUrl(normalizedSrc)
+      if (proxied === playable) {
+        finishWithError()
+        return
+      }
+      setPlayable(proxied)
+      return
+    }
+
+    void resolvePlayableImageSrc(normalizedSrc, {
+      forceNative: true,
+      referer: imageReferer(normalizedSrc),
+    })
+      .then((resolved) => {
+        if (!mountedRef.current) {
+          if (resolved !== normalizedSrc) revokeBlobUrl(resolved)
+          return
+        }
+        if (resolved === normalizedSrc) {
+          finishWithError()
+          return
+        }
+        if (ownedBlobRef.current && ownedBlobRef.current !== resolved) {
+          revokeBlobUrl(ownedBlobRef.current)
+        }
+        ownedBlobRef.current = resolved.startsWith('blob:') ? resolved : null
+        setPlayable(resolved)
+      })
+      .catch(finishWithError)
   }
 
   if (deferLoad && phase !== 'loaded') {
@@ -168,7 +240,9 @@ const InkImageFrame = memo(function InkImageFrame({
       className={`relative block shrink-0 overflow-hidden ${open ? 'cursor-zoom-in' : ''} ${className}`}
     >
       {state === 'loading' && (
-        <span aria-hidden className="ink-shimmer absolute inset-0 block" />
+        <span aria-hidden className="absolute inset-0 block">
+          <span className="ink-shimmer block h-full w-full" />
+        </span>
       )}
       {state !== 'error' && (
         <img
@@ -179,11 +253,12 @@ const InkImageFrame = memo(function InkImageFrame({
           decoding="async"
           referrerPolicy="no-referrer"
           onLoad={() => setState('loaded')}
-          onError={() => setState('error')}
+          onError={retryAfterError}
           className="absolute inset-0 h-full w-full object-cover"
           style={{
-            animation: state === 'loaded' ? 'ink-image-in 520ms var(--ease-ink) both' : undefined,
-            opacity: state === 'loaded' ? undefined : 0,
+            // Release the image transform after entry; retained layers can be clipped on WebView re-entry.
+            animation: state === 'loaded' ? 'ink-image-in 520ms var(--ease-ink) backwards' : undefined,
+            opacity: state === 'loaded' ? 1 : 0,
           }}
         />
       )}

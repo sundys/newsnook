@@ -20,6 +20,7 @@ import {
 import type { Article } from '../src/lib/types'
 import {
   CATEGORIES,
+  CATEGORY_TAXONOMY_VERSION,
   RECOMMEND_CATEGORY,
   RECOMMEND_CATEGORY_ID,
   isReservedCategoryLabel,
@@ -181,16 +182,17 @@ assert.ok(!RECOMMEND_CATEGORY.sourceIds?.length, '动态推荐分类不应有固
 
 // 候选池 = 可见分类信源并集；综合贡献频道启用列表；隐藏分类的源不进池
 const scopedPrefs = normalizePreferences({
-  categoryOrder: ['hot', 'tech'],
+  categoryTaxonomyVersion: CATEGORY_TAXONOMY_VERSION,
+  categoryOrder: ['cn-headlines', 'cn-public'],
   hiddenCategoryIds: CATEGORIES.map((category) => category.id).filter(
-    (id) => !['hot', 'tech'].includes(id),
+    (id) => !['cn-headlines', 'cn-public'].includes(id),
   ),
 })
 const scope = recommendationScopeSourceIds(scopedPrefs, ['enabled-only'])
-assert.ok(scope.includes('netease'), '应包含可见「热点」分类的源')
-assert.ok(scope.includes('ithome'), '应包含可见「科技」分类的源')
+assert.ok(scope.includes('netease'), '应包含可见「国内要闻」分类的源')
+assert.ok(scope.includes('netease-gov'), '应包含可见「公共议题」分类的源')
 assert.ok(!scope.includes('enabled-only'), '综合被隐藏时不应引入频道启用列表')
-assert.ok(!scope.includes('netease-ent'), '隐藏分类的源不应进入推荐范围')
+assert.ok(!scope.includes('bbc-zh'), '隐藏分类的源不应进入推荐范围')
 assert.deepEqual(
   sourceIdsForCategoryWithPrefs(RECOMMEND_CATEGORY_ID, scopedPrefs, ['enabled-only']),
   scope,
@@ -198,9 +200,10 @@ assert.deepEqual(
 
 // 综合可见时贡献频道启用列表
 const mixPrefs = normalizePreferences({
-  categoryOrder: ['mix', 'hot'],
+  categoryTaxonomyVersion: CATEGORY_TAXONOMY_VERSION,
+  categoryOrder: ['mix', 'cn-headlines'],
   hiddenCategoryIds: CATEGORIES.map((category) => category.id).filter(
-    (id) => !['mix', 'hot'].includes(id),
+    (id) => !['mix', 'cn-headlines'].includes(id),
   ),
 })
 const mixScope = recommendationScopeSourceIds(mixPrefs, ['sspai'])
@@ -208,6 +211,7 @@ assert.ok(mixScope.includes('sspai') && mixScope.includes('netease'))
 
 // 严格性：池外不回落——空白布局（仅综合可见且频道未启用任何源）候选池为空
 const blankPrefs = normalizePreferences({
+  categoryTaxonomyVersion: CATEGORY_TAXONOMY_VERSION,
   categoryOrder: ['mix'],
   hiddenCategoryIds: CATEGORIES.map((category) => category.id).filter((id) => id !== 'mix'),
 })

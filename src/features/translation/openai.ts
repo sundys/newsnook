@@ -34,7 +34,15 @@ export function assertOpenAiEndpointAndKey(config: CloudTranslationConfig): stri
   } catch {
     throw new Error('API 地址格式不正确')
   }
-  if (parsed.protocol !== 'https:') throw new Error('为保护 API Key，API 地址必须使用 HTTPS')
+  if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+    throw new Error('API 地址不能包含凭据、查询参数或锚点')
+  }
+  if (parsed.protocol !== 'https:' && (parsed.protocol !== 'http:' || config.allowInsecureHttp !== true)) {
+    throw new Error('API 地址必须使用 HTTPS；Android 用户可在该提供商设置中单独允许 HTTP')
+  }
+  if (parsed.protocol === 'http:' && !Capacitor.isNativePlatform() && typeof location !== 'undefined' && location.protocol === 'https:') {
+    throw new Error('HTTPS 网页不能请求明文 HTTP API，请改用 Android 客户端或 HTTPS 网关')
+  }
   return base
 }
 
@@ -149,6 +157,8 @@ async function getJson(
     const response = await CapacitorHttp.get({
       url,
       headers,
+      // Do not forward a plaintext API token to a redirect target.
+      disableRedirects: url.startsWith('http://'),
       connectTimeout: 15000,
       readTimeout: 45000,
     })

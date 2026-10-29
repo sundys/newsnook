@@ -1,3 +1,4 @@
+import { normalizeCatalogProfile, normalizeFrameworkHint, preserveFutureCatalogProfile } from '../../features/siteCatalog/profile'
 /**
  * 偏好归一化：读入持久化数据时剔除已下线的分类与信源，避免脏配置导致空列表。
  */
@@ -10,19 +11,24 @@ import {
 } from '../../lib/theme'
 import { DEFAULT_CUSTOM_SCHEME, normalizeCustomScheme } from '../../lib/customScheme'
 import { normalizeTranslationPrefs } from '../../features/translation/config'
+import { normalizeReadAloudPrefs } from '../../features/readAloud/config'
 import { normalizeProxyPrefs } from '../../features/proxy/config'
+import { normalizeRssHubInstances } from '../../features/rsshub/instances'
 import {
   CATEGORIES,
+  CATEGORY_TAXONOMY_VERSION,
+  DEFAULT_PRESET_CATEGORY_SOURCES,
   isReservedCategoryLabel,
-  PORTAL_CATEGORY_SOURCES,
   type CategoryId,
   type NewsCategory,
 } from '../categories'
 import {
   SOURCES,
+  canonicalSourceId,
   makeCustomSourceId,
   normalizeSourceKind,
   type NewsSource,
+  type SourceDiscoveryMetadata,
   type SourceGroup,
 } from '../registry'
 import {
@@ -39,11 +45,63 @@ import {
   type TypographyPrefs,
 } from './model'
 import { describeSources } from './categoryPrefs'
+import { migrateLegacyCategoryLayout } from '../taxonomyMigration'
+
+function normalizeDiscoveryMetadata(raw: unknown): SourceDiscoveryMetadata | undefined {
+  if (!raw || typeof raw !== 'object') return undefined
+  const input = raw as Partial<SourceDiscoveryMetadata>
+  const providerId = typeof input.providerId === 'string' ? input.providerId.trim() : ''
+  const entryId = typeof input.entryId === 'string' ? input.entryId.trim() : ''
+  const generator = input.generator
+  if (!providerId || !entryId || !['rsshub', 'rss-bridge', 'feed', 'opml'].includes(String(generator))) {
+    return undefined
+  }
+  const params: Record<string, string | number | boolean> = {}
+  if (input.params && typeof input.params === 'object') {
+    Object.entries(input.params).forEach(([key, value]) => {
+      if (!key || key.length > 120) return
+      // Authorization must never be duplicated into ordinary synced discovery metadata.
+      if (generator === 'rsshub' && /(?:token|secret|password|passwd|cookie|api.?key|auth|credential)/i.test(key)) return
+      if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') {
+        params[key] = value
+      }
+    })
+  }
+  return {
+    providerId,
+    entryId,
+    generator: generator as SourceDiscoveryMetadata['generator'],
+    instanceId: typeof input.instanceId === 'string' && input.instanceId.trim() ? input.instanceId.trim() : undefined,
+    routeKey: typeof input.routeKey === 'string' && input.routeKey.trim() ? input.routeKey.trim() : undefined,
+    params: Object.keys(params).length ? params : undefined,
+    verification:
+      input.verification && typeof input.verification === 'object' &&
+      (input.verification.status === 'verified' || input.verification.status === 'unverified')
+        ? {
+            status: input.verification.status,
+            checkedAt:
+              typeof input.verification.checkedAt === 'number'
+                ? input.verification.checkedAt
+                : undefined,
+          }
+        : undefined,
+  }
+}
+
+function uniqueValidSourceIds(raw: unknown, knownSourceIds: Set<string>): string[] {
+  if (!Array.isArray(raw)) return []
+  const valid = raw
+    .filter((id): id is string => typeof id === 'string')
+    .map(canonicalSourceId)
+    .filter((id) => knownSourceIds.has(id))
+  return [...new Set(valid)]
+}
 
 /** 读入持久化数据时剔除已下线的分类与信源，避免脏配置导致空列表 */
 export function normalizePreferences(raw: unknown): Preferences {
   const isFreshInstall = raw == null
-  const input = (raw ?? {}) as Partial<Preferences>
+  const migrated = isFreshInstall ? (raw ?? {}) : migrateLegacyCategoryLayout(raw).value
+  const input = migrated as Partial<Preferences>
   const typography = (input.typography ?? {}) as Partial<TypographyPrefs>
 
   // 1. 规范化自建订阅源列表
@@ -56,6 +114,13 @@ export function normalizePreferences(raw: unknown): Preferences {
       const rawUrl = typeof item.url === 'string' ? item.url.trim() : ''
       const rawName = typeof item.name === 'string' ? item.name.trim() : ''
       if (!rawUrl || !rawName) return
+      const kind = normalizeSourceKind(typeof item.kind === 'string' ? item.kind : undefined)
+      if (kind === 'web-catalog') {
+        try {
+          const url = new URL(rawUrl)
+          if (!/^https?:$/.test(url.protocol) || url.username || url.password) return
+        } catch { return }
+      }
 
       const rawId =
         typeof item.id === 'string' && item.id.trim()
@@ -76,16 +141,19 @@ export function normalizePreferences(raw: unknown): Preferences {
         name: rawName,
         label: rawLabel || rawName.slice(0, 4),
         group: rawGroup,
-        kind: normalizeSourceKind(typeof item.kind === 'string' ? item.kind : undefined),
+        kind,
         url: rawUrl,
         siteUrl: rawSiteUrl,
         enabled: typeof item.enabled === 'boolean' ? item.enabled : true,
         isCustom: true,
         createdAt: typeof item.createdAt === 'number' ? item.createdAt : Date.now(),
+        paused: item.paused === true,
+        discovery: normalizeDiscoveryMetadata(item.discovery),
       }
-      if (item.frameworkHint && typeof item.frameworkHint === 'object') {
-        source.frameworkHint = item.frameworkHint
-      }
+      source.catalogProfileOpaque = preserveFutureCatalogProfile(item.catalogProfile ?? item.catalogProfileOpaque, source.url)
+      source.catalogProfile = normalizeCatalogProfile(item.catalogProfile, source.url)
+      source.frameworkHint = normalizeFrameworkHint(item.frameworkHint, source.url)
+
       customSources.push(source)
     })
   }
@@ -102,7 +170,7 @@ export function normalizePreferences(raw: unknown): Preferences {
       const rawShort = typeof item.short === 'string' ? item.short.trim() : ''
       if (!rawId || !rawLabel) return
 
-      const sourceIds = uniqueValid(item.sourceIds, knownSourceIds)
+      const sourceIds = uniqueValidSourceIds(item.sourceIds, knownSourceIds)
       if (!sourceIds.length) return
 
       customCategories.push({
@@ -123,11 +191,11 @@ export function normalizePreferences(raw: unknown): Preferences {
 
   const categorySources: Record<CategoryId, string[]> = {}
   if (input.categorySources == null) {
-    Object.assign(categorySources, PORTAL_CATEGORY_SOURCES)
+    Object.assign(categorySources, DEFAULT_PRESET_CATEGORY_SOURCES)
   } else {
     Object.entries(input.categorySources).forEach(([categoryId, sourceIds]) => {
       if (!allCategoryIds.has(categoryId) || isAggregateCategoryId(categoryId)) return
-      const valid = uniqueValid(sourceIds, knownSourceIds)
+      const valid = uniqueValidSourceIds(sourceIds, knownSourceIds)
       categorySources[categoryId] = valid
     })
   }
@@ -149,7 +217,7 @@ export function normalizePreferences(raw: unknown): Preferences {
     })
   }
 
-  // 缺省键 → 门户经典默认隐藏；显式 [] 表示用户/旧数据「全部显示」，不强制迁移
+  // 缺省键 → 当前 taxonomy 默认预设隐藏策略；显式 [] 表示当前布局选择「全部显示」。
   const hidden = Array.isArray(input.hiddenCategoryIds)
     ? uniqueValid(input.hiddenCategoryIds, allCategoryIds)
     : [...DEFAULT_HIDDEN_CATEGORY_IDS]
@@ -168,14 +236,18 @@ export function normalizePreferences(raw: unknown): Preferences {
   }
 
   return {
+    categoryTaxonomyVersion: CATEGORY_TAXONOMY_VERSION,
     categoryOrder,
     // 至少保留一个可见分类，否则首页无内容可选
     hiddenCategoryIds: hidden.length >= allCategoryIds.size ? hidden.slice(1) : hidden,
     categorySources,
     categoryNames,
-    favoriteSourceIds: uniqueValid(input.favoriteSourceIds, knownSourceIds),
+    favoriteSourceIds: uniqueValidSourceIds(input.favoriteSourceIds, knownSourceIds),
     customCategories,
     customSources,
+    sourceNames: Object.fromEntries(Object.entries(input.sourceNames ?? {}).filter(([id, name]) =>
+      SOURCES.some((source) => source.id === id && !source.workspaceOnly) && typeof name === 'string' && name.trim(),
+    ).map(([id, name]) => [id, name.trim()])),
     theme: isThemeMode(input.theme) ? input.theme : DEFAULT_THEME_MODE,
     scheme,
     customScheme,
@@ -187,7 +259,9 @@ export function normalizePreferences(raw: unknown): Preferences {
           ? 'cards'
           : 'classic',
     translation: normalizeTranslationPrefs(input.translation),
+    readAloud: normalizeReadAloudPrefs(input.readAloud),
     proxy: normalizeProxyPrefs(input.proxy),
+    rsshubInstances: normalizeRssHubInstances(input.rsshubInstances),
     autoRefreshOnCategorySwitch:
       typeof input.autoRefreshOnCategorySwitch === 'boolean'
         ? input.autoRefreshOnCategorySwitch

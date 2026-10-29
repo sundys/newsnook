@@ -76,6 +76,7 @@ export function useEdgeSwipeBack({
     let completionTimer = 0
     let transitionEnd: ((event: TransitionEvent) => void) | null = null
     let committing = false
+    let committed = false
 
     const width = () => element.clientWidth || window.innerWidth || 320
 
@@ -123,6 +124,7 @@ export function useEdgeSwipeBack({
       cancelCompletion()
       dragX = 0
       pendingX = 0
+      element.style.visibility = ''
       clearGestureCompositorStyles(element)
       setActiveVisual(false)
     }
@@ -185,8 +187,10 @@ export function useEdgeSwipeBack({
     const commit = (releaseVelocity: number) => {
       resetPointer()
       committing = true
+      committed = true
       const panelWidth = width()
-      const remaining = Math.max(0, panelWidth - dragX)
+      const targetWidth = panelWidth + 48
+      const remaining = Math.max(0, targetWidth - dragX)
       const velocity = Math.max(0.9, releaseVelocity)
       const duration = reduced || remaining <= panelWidth * 0.02
         ? 0
@@ -197,8 +201,9 @@ export function useEdgeSwipeBack({
             ),
           )
 
-      animateTo(panelWidth, duration, COMMIT_EASING, () => {
+      animateTo(targetWidth, duration, COMMIT_EASING, () => {
         committing = false
+        element.style.visibility = 'hidden'
         // Keep the committed reader off-screen until React unmounts it. Clearing
         // the transform here briefly paints the article again before onBack's
         // state update is committed, which looks like a full-page flash.
@@ -420,8 +425,9 @@ export function useEdgeSwipeBack({
 
     const resetInterruptedGesture = () => {
       // 切后台/系统弹窗时不要等待动画完成：相关定时器可能被冻结，必须立刻
-      // 释放 active/committing，否则恢复后 window.touchmove 会继续拦截纵滑。
+      // 释放 active/committing，避免恢复后继续使用旧触点序列。
       committing = false
+      committed = false
       resetPointer()
       clearVisual()
     }
@@ -430,7 +436,10 @@ export function useEdgeSwipeBack({
     }
 
     element.addEventListener('touchstart', onTouchStart, { passive: true })
-    window.addEventListener('touchmove', onTouchMove, { passive: false })
+    // Touch events retain their start target even when the finger leaves the
+    // reader. A window-level move listener can intercept unrelated surfaces
+    // when a lost terminal event is followed by a reused touch identifier.
+    element.addEventListener('touchmove', onTouchMove, { passive: false })
     window.addEventListener('touchend', onTouchEnd)
     window.addEventListener('touchcancel', onTouchCancel)
     element.addEventListener('pointerdown', onPointerDown)
@@ -443,7 +452,7 @@ export function useEdgeSwipeBack({
 
     return () => {
       element.removeEventListener('touchstart', onTouchStart)
-      window.removeEventListener('touchmove', onTouchMove)
+      element.removeEventListener('touchmove', onTouchMove)
       window.removeEventListener('touchend', onTouchEnd)
       window.removeEventListener('touchcancel', onTouchCancel)
       element.removeEventListener('pointerdown', onPointerDown)
@@ -455,7 +464,9 @@ export function useEdgeSwipeBack({
       document.removeEventListener('visibilitychange', onVisibilityChange)
       active = null
       committing = false
-      clearVisual()
+      if (!committed) {
+        clearVisual()
+      }
       element.style.touchAction = previousTouchAction
       element.style.overscrollBehaviorX = previousOverscrollX
     }

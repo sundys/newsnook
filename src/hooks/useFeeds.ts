@@ -1,4 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { catalogCacheVersion, migrateCatalogCache } from '../features/siteCatalog/cache'
+import { siteUrl } from '../features/siteCatalog/context'
+import type { CatalogPage, CatalogRequest } from '../features/siteCatalog/types'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import {
   articleDateCursor,
@@ -16,16 +19,23 @@ import {
 import { fetchAbsoluteText, fetchSourceText } from '../lib/http'
 import { detectNextPageUrl } from '../features/catalogEngine/pagination'
 import { describeNonFeedPayload } from '../lib/feedPayload'
+import { normalizeLegacyVideoArticle } from '../lib/videoArticle'
+import { withCachedBodyPreview } from '../lib/bodyCache'
+import { previewImageUrl } from '../lib/articlePreview'
 import {
   enrichJazzyearDates,
   enrichLatepostDates,
   enrichPaulGrahamDates,
-  neteasePageEntryCount,
-  parseSourcePayload,
-  zhihuEditionDate,
-} from '../lib/parseFeed'
-import { parseSourceArticles } from '../lib/sourceArticles'
+} from '../lib/parseFeed/dateEnrichment'
 import {
+  parseThePaperCursor,
+  thePaperCursor,
+  thePaperCursorAdvances,
+  thePaperPageRequest,
+} from '../lib/parseFeed/deepChinese'
+import { zhihuEditionDate } from '../lib/parseFeed/zhihu'
+import {
+  cachedListMatchesSourceVersion,
   loadCachedList,
   saveCachedArticles,
   type CachedList,
@@ -64,6 +74,36 @@ interface FeedsResult {
   /** 不传则刷新 hook 当前跟踪的全部源；传入则只刷新这些源 */
   refresh: (sourceIds?: string[]) => Promise<void>
   loadMore: (sourceIds: string[]) => Promise<void>
+  updateArticlePreview: (article: Article) => void
+}
+
+/** Cache display uses stored Article data; full parsers are only needed after a
+ * source fetch or a user-requested catalog page. Avoid importing the complete
+ * XML/HTML parser and source extractor graph on a normal offline cold launch.
+ */
+async function loadCatalogPage(source: NewsSource, request: CatalogRequest, signal?: AbortSignal): Promise<CatalogPage> {
+  const module = await import('../features/siteCatalog/service')
+  return module.loadCatalogPage(source, request, signal)
+}
+
+async function parseSourceArticles(
+  source: NewsSource,
+  payload: string,
+  signal?: AbortSignal,
+  pageUrl?: string,
+): Promise<Article[]> {
+  const module = await import('../lib/sourceArticles')
+  return module.parseSourceArticles(source, payload, signal, pageUrl)
+}
+
+async function parseSourcePayload(source: NewsSource, payload: string): Promise<Article[]> {
+  const module = await import('../lib/parseFeed')
+  return module.parseSourcePayload(source, payload)
+}
+
+async function neteasePageEntryCount(payload: string): Promise<number> {
+  const module = await import('../lib/parseFeed/netease')
+  return module.neteasePageEntryCount(payload)
 }
 
 /** Keep one slow source from holding the whole refresh UI indefinitely. */
@@ -119,6 +159,10 @@ function pagingFromCache(
   const persisted = cached.paging
   switch (pagingStrategyOf(source)) {
     case 'upstream-offset': {
+      if (source.kind === 'web-catalog') {
+        const nextUrl = persisted?.nextUrl && siteUrl(persisted.nextUrl, source.url)
+        return { phase: nextUrl ? 'ready' : persisted?.exhausted ? 'exhausted' : 'uninitialized', page: persisted?.page ?? 0, nextUrl: nextUrl || undefined }
+      }
       const maxPage = Math.max(0, maxOffsetPages(source) - 1)
       const inferredPage = Math.max(
         0,
@@ -144,10 +188,12 @@ function pagingFromCache(
       }
     }
     case 'upstream-cursor': {
-      const cursor = persisted?.cursor ?? articleDateCursor(cached.items)
+      const cursor =
+        persisted?.cursor ?? (source.kind === 'zhihu' ? articleDateCursor(cached.items) : undefined)
       return {
         phase: persisted?.exhausted ? 'exhausted' : cursor ? 'ready' : 'uninitialized',
         cursor,
+        page: persisted?.page,
       }
     }
   }
@@ -162,8 +208,19 @@ function loadCachedSource(
   paging: SourcePagingState
 } {
   const source = findSource(sourceId, extraSources)
-  const cached = loadCachedList(sourceId)
-  let items = cached?.items ?? []
+  const loadedCache = loadCachedList(sourceId)
+  const expectedVersion = catalogCacheVersion(source)
+  const matches = cachedListMatchesSourceVersion(loadedCache, expectedVersion)
+  const legacyCatalog = source?.kind === 'web-catalog' && loadedCache && !matches
+  const cached = matches || legacyCatalog ? loadedCache : null
+  let items = (cached?.items ?? []).map(normalizeLegacyVideoArticle).map(withCachedBodyPreview)
+  if (cached && items.some((item, index) => item.image !== cached.items[index]?.image)) {
+    saveCachedArticles(sourceId, items, cached.paging, cached.cachedAt)
+  }
+  if (legacyCatalog && source && cached) {
+    items = migrateCatalogCache(source, items)
+    saveCachedArticles(sourceId, items, { ...cached.paging, sourceVersion: expectedVersion }, cached.cachedAt)
+  }
   if (
     source &&
     cached &&
@@ -242,6 +299,7 @@ function cacheMeta(state: SourcePagingState | undefined): CachedPagingMeta | und
   const meta: CachedPagingMeta = {}
   if (typeof state.page === 'number') meta.page = state.page
   if (state.cursor) meta.cursor = state.cursor
+  if (state.nextUrl) meta.nextUrl = state.nextUrl
   if (state.phase === 'exhausted') meta.exhausted = true
   return Object.keys(meta).length ? meta : undefined
 }
@@ -252,13 +310,15 @@ function cacheMetaForItems(
   items: Article[],
   extraSources?: NewsSource[],
 ): CachedPagingMeta | undefined {
-  const meta = cacheMeta(state)
   const source = findSource(sourceId, extraSources)
-  if (source?.kind !== 'zhihu') return meta
+  const meta: CachedPagingMeta = { ...cacheMeta(state) }
+  const version = catalogCacheVersion(source)
+  if (version) meta.sourceVersion = version
+  if (source?.kind !== 'zhihu') return Object.keys(meta).length ? meta : undefined
 
   const cachedItems = items.slice(0, 160)
   const cachedCursor = articleDateCursor(cachedItems)
-  const next = { ...meta, cursor: cachedCursor ?? meta?.cursor }
+  const next = { ...meta, cursor: cachedCursor ?? meta.cursor }
   // When memory contains more than the durable cache can retain, the archive
   // may continue from the oldest retained date after restart.
   if (items.length > cachedItems.length) delete next.exhausted
@@ -273,6 +333,8 @@ export function useFeeds(
   enabledIds: string[],
   onCacheChange?: () => void,
   extraSources?: NewsSource[],
+  refreshContextKey?: string,
+  automaticFetchIds: string[] = enabledIds,
 ): FeedsResult {
   const initialRef = useRef<InitialFeeds | null>(null)
   if (!initialRef.current) initialRef.current = readInitialFeeds(enabledIds, extraSources)
@@ -294,18 +356,48 @@ export function useFeeds(
   enabledIdsRef.current = enabledIds
   const extraSourcesRef = useRef(extraSources)
   extraSourcesRef.current = extraSources
+  const automaticFetchIdsRef = useRef(automaticFetchIds)
+  automaticFetchIdsRef.current = automaticFetchIds
   const getSource = useCallback((id: string) => findSource(id, extraSourcesRef.current), [])
   /** client-catalog：完整解析结果仅驻内存，列表窗口从此切片 */
   const catalogRef = useRef<Map<string, Article[]>>(new Map())
+  const catalogTraversalRef = useRef(new Map<string, { urls: Set<string>; signatures: Set<string> }>())
 
   const refreshControllerRef = useRef<AbortController | null>(null)
   const prefetchControllerRef = useRef<AbortController | null>(null)
   const loadMoreControllerRef = useRef<AbortController | null>(null)
   const loadMoreInFlightRef = useRef(false)
   const refreshInFlightRef = useRef(false)
+  const refreshContextRef = useRef(refreshContextKey)
+
+  const cancelActiveRefresh = useCallback(() => {
+    const controller = refreshControllerRef.current
+    refreshControllerRef.current = null
+    controller?.abort()
+    refreshInFlightRef.current = false
+    setRefreshing(false)
+    setRefreshProgress(null)
+    setStatuses((prev) => {
+      let changed = false
+      const next = { ...prev }
+      Object.entries(prev).forEach(([id, status]) => {
+        if (status?.state !== 'loading') return
+        delete next[id]
+        changed = true
+      })
+      return changed ? next : prev
+    })
+  }, [])
+
+  useLayoutEffect(() => {
+    if (refreshContextRef.current === refreshContextKey) return
+    refreshContextRef.current = refreshContextKey
+    cancelActiveRefresh()
+  }, [cancelActiveRefresh, refreshContextKey])
 
   // 分类切换时按需从本地缓存补齐，不在首屏同步扫全部源
   const enabledKey = enabledIds.join('|')
+  const automaticFetchKey = automaticFetchIds.join('|')
   useEffect(() => {
     const merged = mergeCachedSources(
       bucketsRef.current,
@@ -329,9 +421,10 @@ export function useFeeds(
     async (source: NewsSource, signal: AbortSignal): Promise<Article[]> => {
       const cached = catalogRef.current.get(source.id)
       if (cached?.length) return cached
-      const payload = await fetchSourceText(source, signal)
+      const page = source.kind === 'web-catalog' ? await loadCatalogPage(source, { method: 'GET', url: source.url }, signal) : undefined
+      const payload = page ? '' : await fetchSourceText(source, signal)
       const { catalog } = openClientCatalog(
-        await parseSourceArticles(source, payload, signal),
+        page?.articles ?? await parseSourceArticles(source, payload, signal),
         CATALOG_PAGE_SIZE,
       )
       catalogRef.current.set(source.id, catalog)
@@ -362,19 +455,36 @@ export function useFeeds(
     setPagingTick((tick) => tick + 1)
   }, [])
 
-  const commitBucket = useCallback((id: string, items: Article[]) => {
-    const next = new Map(bucketsRef.current).set(id, items)
+  const commitBucket = useCallback((id: string, items: Article[], cachedAt?: number) => {
+    const previous = new Map((bucketsRef.current.get(id) ?? []).map((article) => [article.id, article]))
+    const enriched = items.map((article) => {
+      const local = withCachedBodyPreview(article)
+      const image = previous.get(article.id)?.image
+      return !local.image && image ? { ...local, image } : local
+    })
+    const next = new Map(bucketsRef.current).set(id, enriched)
     bucketsRef.current = next
     setBuckets(next)
     saveCachedArticles(
       id,
-      items,
-      cacheMetaForItems(id, pagingRef.current[id], items, extraSourcesRef.current),
+      enriched,
+      cacheMetaForItems(id, pagingRef.current[id], enriched, extraSourcesRef.current),
+      cachedAt,
     )
   }, [])
 
+  const updateArticlePreview = useCallback((article: Article) => {
+    const image = previewImageUrl(article.image, article.originUrl)
+    if (!image) return
+    const items = bucketsRef.current.get(article.sourceId)
+    if (!items?.some((item) => item.id === article.id && !item.image)) return
+    commitBucket(article.sourceId, items.map((item) =>
+      item.id === article.id && !item.image ? { ...item, image } : item,
+    ), updatedAtRef.current[article.sourceId])
+  }, [commitBucket])
+
   const applyHeadPage = useCallback(
-    (id: string, source: NewsSource, payload: string, incoming: Article[]): number => {
+    (id: string, source: NewsSource, payload: string, incoming: Article[], catalogPage?: CatalogPage): number => {
       const previousPaging = pagingRef.current[id] ?? { phase: 'uninitialized' as const }
       const strategy = pagingStrategyOf(source)
 
@@ -385,13 +495,33 @@ export function useFeeds(
         // 下拉刷新重置窗口，避免旧全量缓存继续占内存 / 本地存储
         commitBucket(id, head)
         markBucketReady(id, head)
+        if (source.kind === 'feed' && head.length) {
+          void import('../lib/feedBodySnapshot').then(({ persistShortFeedSnapshots }) => {
+            void persistShortFeedSnapshots(head).catch(() => { /* optional local cache */ })
+          }).catch(() => { /* preserve successful list load */ })
+        }
         return head.length
       }
 
       if (strategy === 'upstream-offset') {
         // Offset pages shift when new headlines arrive. Rewalk from page 1 and
         // dedupe against retained history so a refresh cannot create gaps.
-        updatePaging(id, { phase: 'ready', page: 0 })
+        if (source.kind === 'web-catalog') {
+          catalogTraversalRef.current.set(id, { urls: new Set([source.url, catalogPage?.url ?? source.url]), signatures: new Set([incoming.map((article) => article.id).sort().join('|')]) })
+          const nextUrl = catalogPage?.pagination.nextUrl ?? detectNextPageUrl(payload, source.url)
+          updatePaging(id, { phase: nextUrl ? 'ready' : 'exhausted', page: 0, nextUrl })
+        } else updatePaging(id, { phase: 'ready', page: 0 })
+      } else if (source.kind === 'thepaper') {
+        // 澎湃的 startTime 是服务端快照游标；刷新必须采用本次首页返回的新游标，
+        // 不能沿用旧缓存，否则会从旧快照继续翻页并产生缺口。
+        const cursor = thePaperCursor(payload)
+        const parsedCursor = parseThePaperCursor(cursor)
+        updatePaging(id, {
+          phase: parsedCursor ? (parsedCursor.hasNext ? 'ready' : 'exhausted') : 'error',
+          page: 0,
+          cursor,
+          error: parsedCursor ? undefined : '澎湃未返回有效分页游标',
+        })
       } else {
         const edition = zhihuEditionDate(payload)
         updatePaging(id, {
@@ -405,6 +535,14 @@ export function useFeeds(
       const merged = mergeHeadPage(existing, incoming)
       commitBucket(id, merged)
       markBucketReady(id, merged)
+      if (source.kind === 'feed' && incoming.length) {
+        // The visible list is already committed. Save a limited number of
+        // short full feed bodies in idle time so a post remains readable when
+        // its RSS item later falls out of the upstream window.
+        void import('../lib/feedBodySnapshot').then(({ persistShortFeedSnapshots }) => {
+          void persistShortFeedSnapshots(incoming).catch(() => { /* optional local cache */ })
+        }).catch(() => { /* don't interrupt successful feed refresh */ })
+      }
       return merged.length
     },
     [commitBucket, markBucketReady, updatePaging],
@@ -438,6 +576,14 @@ export function useFeeds(
     })
     setPagingTick((tick) => tick + 1)
   }, [])
+
+  useLayoutEffect(() => {
+    // 分类/预设/暂停导致自动网络作用域变化时，旧请求的迟到响应不得落回新作用域。
+    cancelActiveRefresh()
+    prefetchControllerRef.current?.abort()
+    prefetchControllerRef.current = null
+    stopLoadMore()
+  }, [automaticFetchKey, cancelActiveRefresh, stopLoadMore])
 
   /** Pull-to-refresh updates the head and preserves previously loaded history. */
   const refresh = useCallback(async (sourceIds?: string[]) => {
@@ -479,13 +625,15 @@ export function useFeeds(
           if (!source) return
           let synced = false
           try {
-            const payload = await fetchSourceText(source, controller.signal)
+            const catalogPage = source.kind === 'web-catalog' ? await loadCatalogPage(source, { method: 'GET', url: source.url }, controller.signal) : undefined
+            const payload = catalogPage ? '' : await fetchSourceText(source, controller.signal)
             if (controller.signal.aborted) return
-            const articles = parseSourcePayload(source, payload)
+            const articles = catalogPage?.articles ?? await parseSourcePayload(source, payload)
+            if (controller.signal.aborted) return
             if (!articles.length) {
               throw new Error(describeNonFeedPayload(payload) || '返回内容为空')
             }
-            applyHeadPage(id, source, payload, articles)
+            applyHeadPage(id, source, payload, articles, catalogPage)
             scheduleDetailDateEnrichment(
               id,
               source,
@@ -571,13 +719,15 @@ export function useFeeds(
             const source = getSource(id)
             if (!source) return
             try {
-              const payload = await fetchSourceText(source, controller.signal)
+              const catalogPage = source.kind === 'web-catalog' ? await loadCatalogPage(source, { method: 'GET', url: source.url }, controller.signal) : undefined
+              const payload = catalogPage ? '' : await fetchSourceText(source, controller.signal)
               if (controller.signal.aborted) return
-              const articles = parseSourcePayload(source, payload)
+              const articles = catalogPage?.articles ?? await parseSourcePayload(source, payload)
+              if (controller.signal.aborted) return
               if (!articles.length) {
                 throw new Error(describeNonFeedPayload(payload) || '返回内容为空')
               }
-              applyHeadPage(id, source, payload, articles)
+              applyHeadPage(id, source, payload, articles, catalogPage)
               scheduleDetailDateEnrichment(
                 id,
                 source,
@@ -618,7 +768,7 @@ export function useFeeds(
       if (refreshInFlightRef.current || loadMoreInFlightRef.current) return
       const targets = [...new Set(sourceIds)].filter((id) => {
         const source = getSource(id)
-        if (!source || !sourceSupportsPaging(source)) return false
+        if (!source || source.paused || !sourceSupportsPaging(source)) return false
         return pagingRef.current[id]?.phase !== 'exhausted'
       })
       if (!targets.length) return
@@ -680,43 +830,45 @@ export function useFeeds(
 
             if (strategy === 'upstream-offset') {
               // next-link: use discovered URL from previous page
-              if (source.frameworkHint?.paginationPattern.kind === 'next-link') {
-                const nextUrl = pagingRef.current[id]?.nextUrl
-                if (!nextUrl) {
-                  const headPayload = await fetchSourceText(source, controller.signal)
+              if (source.kind === 'web-catalog') {
+                let nextUrl = pagingRef.current[id]?.nextUrl
+                if (!nextUrl && previous.phase === 'uninitialized') {
+                  const head = await loadCatalogPage(source, { method: 'GET', url: source.url }, controller.signal)
                   if (controller.signal.aborted) return
-                  const headArticles = await parseSourceArticles(source, headPayload, controller.signal)
-                  applyHeadPage(id, source, headPayload, headArticles)
-                  const discoveredNext = detectNextPageUrl(headPayload, source.url)
-                  updatePaging(id, {
-                    phase: discoveredNext ? 'ready' : 'exhausted',
-                    page: 0,
-                    nextUrl: discoveredNext,
-                  })
-                  return
+                  applyHeadPage(id, source, '', head.articles, head)
+                  nextUrl = head.pagination.nextUrl
                 }
-
-                const payload = await fetchSourceText(source, controller.signal, { url: nextUrl })
-                if (controller.signal.aborted) return
-                const parsed = await parseSourceArticles(source, payload, controller.signal)
-                const discoveredNext = detectNextPageUrl(payload, nextUrl)
-                const currentPage = pagingRef.current[id]?.page ?? 0
-                updatePaging(id, {
-                  phase: discoveredNext && parsed.length ? 'ready' : 'exhausted',
-                  page: currentPage + 1,
-                  nextUrl: discoveredNext,
-                })
-                const existing = bucketsRef.current.get(id) ?? []
-                if (!parsed.length) {
-                  saveCachedArticles(id, existing, cacheMetaForItems(id, pagingRef.current[id], existing))
-                  return
-                }
-                const historical = placeUndatedPageAfterExisting(existing, parsed)
-                const { merged, added } = mergeOlderPage(existing, historical)
-                if (added > 0) {
-                  commitBucket(id, merged)
-                  anyAdded = true
-                  markBucketReady(id, merged)
+                const traversal = catalogTraversalRef.current.get(id) ?? { urls: new Set<string>(), signatures: new Set<string>() }
+                catalogTraversalRef.current.set(id, traversal)
+                // A head refresh retains historical buckets: skip already-known pages,
+                // stopping only on repeated pages within this traversal or observed end.
+                for (let attempt = 0; attempt < 3; attempt++) {
+                  const currentPage = pagingRef.current[id]?.page ?? 0
+                  if (!nextUrl || traversal.urls.has(nextUrl) || currentPage >= maxOffsetPages(source) - 1) {
+                    updatePaging(id, { ...pagingRef.current[id], phase: 'exhausted' })
+                    return
+                  }
+                  const page = await loadCatalogPage(source, { method: 'GET', url: nextUrl }, controller.signal)
+                  if (controller.signal.aborted) return
+                  const parsed = page.articles
+                  const signature = parsed.map((article) => article.id).sort().join('|')
+                  const repeated = traversal.signatures.has(signature)
+                  traversal.urls.add(nextUrl)
+                  traversal.urls.add(page.url)
+                  traversal.signatures.add(signature)
+                  nextUrl = page.pagination.nextUrl
+                  const exhausted = !nextUrl || !parsed.length || repeated || traversal.urls.has(nextUrl)
+                  updatePaging(id, { phase: exhausted ? 'exhausted' : 'ready', page: currentPage + 1, nextUrl })
+                  const existing = bucketsRef.current.get(id) ?? []
+                  const { merged, added } = mergeOlderPage(existing, placeUndatedPageAfterExisting(existing, parsed))
+                  if (added > 0) {
+                    commitBucket(id, merged)
+                    anyAdded = true
+                    markBucketReady(id, merged)
+                    return
+                  }
+                  saveCachedArticles(id, existing, cacheMetaForItems(id, pagingRef.current[id], existing, extraSourcesRef.current))
+                  if (exhausted) return
                 }
                 return
               }
@@ -740,7 +892,7 @@ export function useFeeds(
                 const parsed = await parseSourceArticles(source, payload, controller.signal)
                 // 网易用原始条目数（过滤图集后可能为空但仍有下一页）；其它源用解析结果
                 const rawCount =
-                  source.kind === 'netease' ? neteasePageEntryCount(payload) : parsed.length
+                  source.kind === 'netease' ? await neteasePageEntryCount(payload) : parsed.length
                 const exhausted = rawCount === 0 || nextPage + 1 >= maxPages
                 updatePaging(id, {
                   phase: exhausted ? 'exhausted' : 'ready',
@@ -767,9 +919,8 @@ export function useFeeds(
               return
             }
 
-            // upstream-cursor（知乎日报）
-            // Old cache versions did not persist the date cursor. Initialize
-            // the head first, then continue to the historical page in this request.
+            // upstream-cursor：澎湃使用 startTime 快照游标；知乎日报使用日期游标。
+            // 旧缓存可能没有游标，先刷新首页建立游标，再在同一次交互继续向后翻。
             if (!state.cursor) {
               const headPayload = await fetchSourceText(source, controller.signal)
               if (controller.signal.aborted) return
@@ -778,27 +929,60 @@ export function useFeeds(
                 headPayload,
                 controller.signal,
               )
-              if (!headArticles.length) throw new Error('知乎日报最新一期为空')
+              if (!headArticles.length) {
+                throw new Error(source.kind === 'thepaper' ? '澎湃最新列表为空' : '知乎日报最新一期为空')
+              }
               applyHeadPage(id, source, headPayload, headArticles)
               state = pagingRef.current[id]
               updatePaging(id, { ...state, phase: 'loading', error: undefined })
             }
 
             const previousCursor = state.cursor
-            if (!previousCursor) throw new Error('知乎日报日期游标尚未初始化')
-            const payload = await fetchSourceText(source, controller.signal, {
-              url: zhihuBeforeUrl(previousCursor),
-            })
+            if (!previousCursor) {
+              throw new Error(source.kind === 'thepaper' ? '澎湃分页游标尚未初始化' : '知乎日报日期游标尚未初始化')
+            }
+
+            let payload: string
+            let nextCursor: string | undefined
+            let nextPage = state.page ?? 0
+            if (source.kind === 'thepaper') {
+              const requestJson = thePaperPageRequest(source, previousCursor, nextPage + 1)
+              if (!requestJson) {
+                updatePaging(id, { ...state, phase: 'exhausted' })
+                return
+              }
+              payload = await fetchSourceText(source, controller.signal, { requestJson })
+              nextCursor = thePaperCursor(payload)
+              if (!nextCursor || !thePaperCursorAdvances(previousCursor, nextCursor)) {
+                throw new Error('澎湃返回了未前进的历史分页游标')
+              }
+              nextPage += 1
+            } else {
+              payload = await fetchSourceText(source, controller.signal, {
+                url: zhihuBeforeUrl(previousCursor),
+              })
+              nextCursor = zhihuEditionDate(payload)
+              if (!nextCursor || nextCursor >= previousCursor) {
+                throw new Error('知乎日报返回了无效的历史日期游标')
+              }
+            }
+
             if (controller.signal.aborted) return
             const parsed = await parseSourceArticles(source, payload, controller.signal)
-            const nextCursor = zhihuEditionDate(payload)
-            if (!nextCursor || nextCursor >= previousCursor) {
-              throw new Error('知乎日报返回了无效的历史日期游标')
+            if (source.kind === 'thepaper') {
+              const parsedCursor = parseThePaperCursor(nextCursor)
+              if (!parsedCursor) throw new Error('澎湃返回了无效的历史分页游标')
+              updatePaging(id, {
+                phase: parsed.length && parsedCursor.hasNext ? 'ready' : 'exhausted',
+                page: nextPage,
+                cursor: nextCursor,
+              })
+            } else {
+              updatePaging(id, {
+                phase: parsed.length ? 'ready' : 'exhausted',
+                cursor: nextCursor,
+              })
             }
-            updatePaging(id, {
-              phase: parsed.length ? 'ready' : 'exhausted',
-              cursor: nextCursor,
-            })
 
             const existing = bucketsRef.current.get(id) ?? []
             if (!parsed.length) {
@@ -809,7 +993,9 @@ export function useFeeds(
               )
               return
             }
-            const { merged, added } = mergeOlderPage(existing, parsed)
+            const historical =
+              source.kind === 'thepaper' ? placeUndatedPageAfterExisting(existing, parsed) : parsed
+            const { merged, added } = mergeOlderPage(existing, historical)
             commitBucket(id, merged)
             if (added > 0) {
               anyAdded = true
@@ -838,7 +1024,7 @@ export function useFeeds(
         if (anyAdded) onCacheChange?.()
       }
     },
-    [applyHeadPage, commitBucket, ensureClientCatalog, markBucketReady, onCacheChange, updatePaging],
+    [applyHeadPage, commitBucket, ensureClientCatalog, getSource, markBucketReady, onCacheChange, updatePaging],
   )
 
   useEffect(() => {
@@ -850,8 +1036,15 @@ export function useFeeds(
   }, [])
 
   useEffect(() => {
-    void prefetchMissing(enabledIdsRef.current)
-  }, [enabledKey, prefetchMissing])
+    let cancelled = false
+    // The owning App can start its explicit refresh later in this same effect
+    // flush. Yield one microtask so its in-flight guard prevents an immediately
+    // aborted duplicate request; standalone hooks still prefetch cache misses.
+    void Promise.resolve().then(() => {
+      if (!cancelled) void prefetchMissing(automaticFetchIdsRef.current)
+    })
+    return () => { cancelled = true }
+  }, [automaticFetchKey, prefetchMissing])
 
   const articles = useMemo(() => {
     const list: Article[] = []
@@ -889,5 +1082,6 @@ export function useFeeds(
     paginationState,
     refresh,
     loadMore,
+    updateArticlePreview,
   }
 }

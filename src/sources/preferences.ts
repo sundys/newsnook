@@ -37,6 +37,7 @@ export {
   addCustomCategory,
   allRegisteredCategories,
   allRegisteredSources,
+  automaticSourceIds,
   categorySourceIds,
   defaultFeedCategoryId,
   deleteCustomCategory,
@@ -72,6 +73,8 @@ export {
   deleteCustomSource,
   deleteCustomSources,
   updateCustomSource,
+  renameSource,
+  moveCmsSource,
 } from './preferences/customSources'
 
 export {

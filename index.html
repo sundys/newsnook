@@ -9,10 +9,10 @@
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no"
     />
-    <!-- 启动阶段固定深色；主题色等启动页交还后再改，避免状态栏区域闪米白 -->
-    <meta name="theme-color" content="#0E0F12" />
+    <!-- Native splash and initial WebView placeholder share the same white background. -->
+    <meta name="theme-color" content="#FFFFFF" />
     <meta name="referrer" content="no-referrer" />
-    <meta name="description" content="有所闻 News Nook，直连原发媒体的沉浸式阅读器。" />
+    <meta name="description" content="有所闻 News Nook，直连原发媒体的沉浸式阅读应用。" />
     <!--
       首页的默认社交卡片。仅当抓取站点根等普通页面时生效；
       /a/* 分享深链要么在边缘 worker 就被接走、要么由 worker 按 token 把这几行
@@ -22,7 +22,7 @@
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="有所闻" />
     <meta property="og:title" content="有所闻 · News Nook" />
-    <meta property="og:description" content="有所闻 News Nook，直连原发媒体的沉浸式阅读器。" />
+    <meta property="og:description" content="有所闻 News Nook，直连原发媒体的沉浸式阅读应用。" />
     <meta property="og:url" content="https://news.aizeek.com/" />
     <meta property="og:image" content="https://news.aizeek.com/og-default.png" />
     <meta property="og:image:width" content="1200" />
@@ -46,25 +46,25 @@
       }
 
       /*
-       * #boot-splash 只是 WebView 首帧的深色壳，防止系统开屏撤走后露白。
-       * 静态/完整启动画面仍由 React StartupSplash 绘制，这里不画假竖线。
+       * The initial WebView shell matches Android's white splash window.
+       * React removes the placeholder after the actual app UI commits.
        */
       html,
       body {
         margin: 0;
-        background: #0e0f12;
+        background: #fff;
       }
 
       html[data-boot='splash'],
       html[data-boot='splash'] body {
-        background: #0e0f12;
+        background: #fff;
       }
 
       #boot-splash {
         position: fixed;
         z-index: 2147483646;
         inset: 0;
-        background: #0e0f12;
+        background: #fff;
         pointer-events: none;
       }
     </style>
@@ -83,6 +83,10 @@
     />
     <title>有所闻 · News Nook</title>
     <script>
+      console.info('__NNSTART html-head web=' + performance.now().toFixed(1) + 'ms')
+      try {
+        window.NewsNookNative?.reportStartupStage?.('html-head', performance.now())
+      } catch (_) { /* diagnostic only */ }
       // WebView 版本检测：低于 Chrome 69 直接提示，不进入应用
       ;(function () {
         var ua = navigator.userAgent
@@ -149,6 +153,47 @@
             return JSON.parse(JSON.stringify(val))
           }
         }
+        // ParentNode.replaceChildren（Chrome / Android WebView 86+）
+        // NewsNook 的最低运行基线是 Chrome 69；Vite 只转译语法，不会补 DOM API。
+        // 同时覆盖 Element / DocumentFragment，防止正文增强 effect 因一个现代 DOM API
+        // 直接中断，留下尚未接管的静态占位。
+        var replaceChildrenCompat = function () {
+          while (this.firstChild) this.removeChild(this.firstChild)
+          var doc = this.ownerDocument || document
+          for (var i = 0; i < arguments.length; i++) {
+            var value = arguments[i]
+            this.appendChild(value instanceof Node ? value : doc.createTextNode(String(value)))
+          }
+        }
+        if (typeof Element !== 'undefined' && !Element.prototype.replaceChildren) {
+          Element.prototype.replaceChildren = replaceChildrenCompat
+        }
+        if (typeof DocumentFragment !== 'undefined' && !DocumentFragment.prototype.replaceChildren) {
+          DocumentFragment.prototype.replaceChildren = replaceChildrenCompat
+        }
+        // String.prototype.matchAll（Chrome / Android WebView 73+）。
+        // 媒体嗅探器需要它解析 HLS / HTML；没有此 polyfill 时 Chrome 69 的
+        // 知乎视频兜底链路会在直链失败后再次中断。
+        if (!String.prototype.matchAll) {
+          String.prototype.matchAll = function (regexp) {
+            var re
+            if (regexp instanceof RegExp) {
+              if (!regexp.global) throw new TypeError('matchAll requires a global RegExp')
+              re = new RegExp(regexp.source, regexp.flags)
+              re.lastIndex = regexp.lastIndex
+            } else {
+              re = new RegExp(String(regexp), 'g')
+            }
+            var input = String(this)
+            var matches = []
+            var match
+            while ((match = re.exec(input)) !== null) {
+              matches.push(match)
+              if (match[0] === '') re.lastIndex += 1
+            }
+            return matches[Symbol.iterator]()
+          }
+        }
         if (typeof queueMicrotask !== 'function') {
           window.queueMicrotask = function (cb) {
             Promise.resolve().then(cb)
@@ -208,10 +253,16 @@
         }
       })()
 
-      // 在样式表生效前定好明暗与风格方案。启动阶段不改 theme-color，避免状态栏闪米白。
+      // Resolve the saved palette before external CSS; the starting chrome is white until real UI paints.
       // 数据源是 localStorage 镜像，真实偏好稍后由 main.tsx 再校准一次。
       ;(function () {
         document.documentElement.dataset.boot = 'splash'
+        // The isolated shell receives its appearance in memory from the native owner.
+        if (window.location.hash === '#private-browser') {
+          document.documentElement.dataset.theme = 'dark'
+          document.documentElement.dataset.scheme = 'ink'
+          return
+        }
 
         try {
           var saved = JSON.parse(localStorage.getItem('newsnook:preferences') || '{}')
@@ -226,7 +277,14 @@
           // 方案白名单与 src/lib/theme.ts 的 ThemeScheme 保持一致，非法值兜底墨问
           var scheme = saved && saved.scheme
           document.documentElement.dataset.scheme =
-            scheme === 'celadon' || scheme === 'pearl' || scheme === 'custom' ? scheme : 'ink'
+            scheme === 'celadon' ||
+            scheme === 'pearl' ||
+            scheme === 'amber' ||
+            scheme === 'dusk' ||
+            scheme === 'buer' ||
+            scheme === 'custom'
+              ? scheme
+              : 'ink'
           if (saved && saved.einkMode === true) {
             document.documentElement.dataset.eink = '1'
           } else {
@@ -241,7 +299,7 @@
     </script>
   </head>
   <body>
-    <!-- 纯深色壳；竖排与文案由 StartupSplash 负责 -->
+    <!-- White WebView boot placeholder; no separate animation or splash delay. -->
     <div id="boot-splash" aria-hidden="true"></div>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>

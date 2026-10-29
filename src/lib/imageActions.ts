@@ -235,6 +235,42 @@ export async function saveImageBlob(
   return 'saved'
 }
 
+/** Save a native browser image without copying its original bytes into the JS bridge. */
+export async function saveImageFileUri(fileUri: string, fileName: string): Promise<ImageActionResult> {
+  if (!Capacitor.isNativePlatform() || !fileUri.startsWith('file:///')) throw new Error('图片文件无效')
+  const albumIdentifier = Capacitor.getPlatform() === 'android' ? await ensureAndroidAlbumId() : undefined
+  await Media.savePhoto({ path: fileUri, albumIdentifier, fileName: fileName.replace(/\.[^.]+$/, '') })
+  return 'saved'
+}
+
+/** Share a separate cache copy so the temporary original can be released immediately. */
+export async function shareImageFileUri(fileUri: string, fileName: string, title: string): Promise<ImageActionResult> {
+  if (!Capacitor.isNativePlatform() || !fileUri.startsWith('file:///')) throw new Error('图片文件无效')
+  const path = `browser-image-share/${fileName}`
+  let copied = false
+  try {
+    try {
+      await Filesystem.mkdir({ path: 'browser-image-share', directory: Directory.Cache, recursive: true })
+    } catch {
+      const existing = await Filesystem.stat({ path: 'browser-image-share', directory: Directory.Cache })
+      if (existing.type !== 'directory') throw new Error('图片分享缓存不可用')
+    }
+    await Filesystem.copy({ from: fileUri, to: path, toDirectory: Directory.Cache })
+    copied = true
+    const { uri } = await Filesystem.getUri({ path, directory: Directory.Cache })
+    await Share.share({ title, dialogTitle: title, files: [uri] })
+    return 'shared'
+  } catch (error) {
+    if (isCancellation(error)) return 'cancelled'
+    throw error
+  } finally {
+    const cleanup = () => { void Filesystem.deleteFile({ path, directory: Directory.Cache }).catch(() => {}) }
+    // Receivers may open their granted URI after chooser completion.
+    if (copied) setTimeout(cleanup, 60_000)
+    else cleanup()
+  }
+}
+
 /** 分享本地生成的图片 */
 export async function shareImageBlob(
   blob: Blob,

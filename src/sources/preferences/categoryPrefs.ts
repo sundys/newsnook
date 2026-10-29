@@ -9,8 +9,8 @@ import {
   FAVORITES_CATEGORY_ID,
   findCategory,
   isReservedCategoryLabel,
-  PORTAL_CATEGORY_SOURCES,
-  PORTAL_VISIBLE_CATEGORY_IDS,
+  DEFAULT_PRESET_CATEGORY_IDS,
+  DEFAULT_PRESET_CATEGORY_SOURCES,
   RECOMMEND_CATEGORY,
   RECOMMEND_CATEGORY_ID,
   type CategoryId,
@@ -27,7 +27,20 @@ import {
 
 /** 获取全部可用信源（内置 + 用户自建） */
 export function allRegisteredSources(prefs?: Preferences): NewsSource[] {
-  return [...SOURCES.filter((source) => !source.workspaceOnly), ...(prefs?.customSources ?? [])]
+  return [...SOURCES.filter((source) => !source.workspaceOnly).map((source) => {
+    const name = prefs?.sourceNames?.[source.id]
+    return name ? { ...source, name, label: name.slice(0, 12) } : source
+  }), ...(prefs?.customSources ?? [])]
+}
+
+/** 自动抓取路径是否应跳过该源。暂停只适用于自建源，内置源始终返回 false。 */
+export function isSourcePaused(sourceId: string, prefs: Preferences): boolean {
+  return prefs.customSources?.some((source) => source.id === sourceId && source.paused === true) ?? false
+}
+
+/** 过滤全局暂停源；分类成员关系本身不被修改。 */
+export function automaticSourceIds(sourceIds: readonly string[], prefs: Preferences): string[] {
+  return sourceIds.filter((sourceId) => !isSourcePaused(sourceId, prefs))
 }
 
 /** 获取全部可用分类（内置 + 用户自建） */
@@ -186,10 +199,10 @@ export function recommendationScopeSourceIds(
   }
   for (const category of visibleCategories(prefs)) {
     if (category.id === FOLLOWS_ENABLED_SOURCES) {
-      enabledIds.forEach(push)
+      automaticSourceIds(enabledIds, prefs).forEach(push)
       continue
     }
-    categorySourceIds(category.id, prefs).forEach(push)
+    automaticSourceIds(categorySourceIds(category.id, prefs), prefs).forEach(push)
   }
   return ids
 }
@@ -233,7 +246,10 @@ export function defaultFeedCategoryId(categories: NewsCategory[]): CategoryId {
   )
 }
 
-/** 当前分类要拉取的信源；综合回落到频道启用列表，推荐取可见分类信源并集 */
+/**
+ * 当前分类的展示成员关系。暂停不会改动分类/综合/收藏成员，因而缓存内容仍可读取；
+ * 只有推荐候选天然属于自动计算范围，会排除暂停源。
+ */
 export function sourceIdsForCategoryWithPrefs(
   categoryId: CategoryId,
   prefs: Preferences,
@@ -253,19 +269,21 @@ function currentOrder(prefs: Preferences): CategoryId[] {
   return orderedCategories(prefs).map((category) => category.id)
 }
 
+/**
+ * 首页快捷前移/后移只能跨越当前可见的普通分类。
+ * 系统派生的「推荐」「收藏」固定位置，不属于 Preferences.categoryOrder；
+ * 跳过隐藏分类，确保一次操作对应首页轨道上一次真实的相邻交换。
+ */
 export function moveCategory(
   prefs: Preferences,
   categoryId: CategoryId,
   direction: -1 | 1,
 ): Preferences {
-  const order = currentOrder(prefs)
-  const index = order.indexOf(categoryId)
-  const target = index + direction
-  if (index < 0 || target < 0 || target >= order.length) return prefs
-
-  const next = [...order]
-  ;[next[index], next[target]] = [next[target], next[index]]
-  return { ...prefs, categoryOrder: next }
+  const visible = visibleCategories(prefs).map((category) => category.id)
+  const index = visible.indexOf(categoryId)
+  const targetId = visible[index + direction]
+  if (index < 0 || !targetId) return prefs
+  return reorderCategories(prefs, categoryId, targetId)
 }
 
 /** 拖拽排序：把 fromId 抽出来插入到 toId 的位置 */
@@ -517,9 +535,9 @@ export function resetCategoryLayout(
 ): Preferences {
   return {
     ...prefs,
-    categoryOrder: [...PORTAL_VISIBLE_CATEGORY_IDS],
+    categoryOrder: [...DEFAULT_PRESET_CATEGORY_IDS],
     hiddenCategoryIds: [...DEFAULT_HIDDEN_CATEGORY_IDS],
-    categorySources: { ...PORTAL_CATEGORY_SOURCES },
+    categorySources: { ...DEFAULT_PRESET_CATEGORY_SOURCES },
     categoryNames: {},
     customCategories: options?.removeCustom ? [] : (prefs.customCategories ?? []),
   }

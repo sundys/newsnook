@@ -12,6 +12,7 @@ import {
   Plus,
   Rss,
   Search,
+  Store,
   Trash2,
   Upload,
   X,
@@ -30,13 +31,22 @@ import {
   type OpmlParseResult,
 } from '../../lib/opml'
 import { parseSourcePayload } from '../../lib/parseFeed'
-import { extractCatalog } from '../../features/catalogEngine/engine'
 import type { CategoryId, NewsCategory } from '../../sources/categories'
 import {
   allRegisteredCategories,
   type Preferences,
 } from '../../sources/preferences'
-import type { NewsSource } from '../../sources/registry'
+import type { NewsSource, SourceDiscoveryMetadata } from '../../sources/registry'
+import { findSubscriptionDuplicate } from '../../features/feedDiscovery/subscriptionActions'
+import { validateFeedUrl } from '../../features/feedDiscovery/routeBuilder'
+import { parseRssHubLogicalInput, describeRssHubRoute } from '../../features/rsshub/input'
+import { normalizeRssHubInstances } from '../../features/rsshub/instances'
+import { probeRssHubRoute } from '../../features/rsshub/probe'
+import { MAX_CATALOG_BYTES } from '../../features/siteCatalog/context'
+import { getSiteCleanDomain } from '../../features/siteCatalog/uiUtils'
+import { probeCatalog } from '../../features/siteCatalog/probe'
+import { fetchProbeEntryPage } from '../../features/siteCatalog/probeUrl'
+import { catalogRequestOptions } from '../../features/siteCatalog/requestIdentity'
 import { detectFramework } from '../../features/frameworkDetect/detect'
 import type { FrameworkHint } from '../../features/frameworkDetect/types'
 
@@ -49,17 +59,20 @@ interface Props {
       url: string
       siteUrl?: string
       kind?: NewsSource['kind']
+      catalogProfile?: NewsSource['catalogProfile']
       frameworkHint?: FrameworkHint
+      discovery?: SourceDiscoveryMetadata
     },
     targetCategoryId?: CategoryId,
   ) => void
   onUpdateCustomSource: (
     sourceId: string,
-    patch: Partial<Pick<NewsSource, 'name' | 'label' | 'url' | 'siteUrl' | 'kind'>>,
+    patch: Partial<Pick<NewsSource, 'name' | 'label' | 'url' | 'siteUrl' | 'kind' | 'frameworkHint' | 'catalogProfile' | 'discovery'>>,
   ) => void
   onDeleteCustomSource: (sourceId: string) => void
   onDeleteCustomSources: (sourceIds: string[]) => void
   onBatchImport: (sources: NewsSource[], categories?: NewsCategory[]) => void
+  onOpenFeedStore: () => void
   onBack: () => void
 }
 
@@ -70,6 +83,7 @@ export function CustomSourcesScreen({
   onDeleteCustomSource,
   onDeleteCustomSources,
   onBatchImport,
+  onOpenFeedStore,
   onBack,
 }: Props) {
   const customSources = prefs.customSources ?? []
@@ -83,12 +97,16 @@ export function CustomSourcesScreen({
   const [inputLabel, setInputLabel] = useState('')
   const [inputSiteUrl, setInputSiteUrl] = useState('')
   const [targetCategory, setTargetCategory] = useState<string>('none')
+  const probeController = useRef<AbortController | null>(null)
+  useEffect(() => () => probeController.current?.abort(), [])
   const [probing, setProbing] = useState(false)
   const [probeError, setProbeError] = useState<string | null>(null)
+  const [probedRssHub, setProbedRssHub] = useState<{ url: string; discovery: SourceDiscoveryMetadata } | null>(null)
   const [probeDiscoveredFeeds, setProbeDiscoveredFeeds] = useState<{ title: string; url: string }[]>([])
   const [probeCatalogHit, setProbeCatalogHit] = useState<{
     name: string
     extractor?: string
+    catalogProfile?: NewsSource['catalogProfile']
     frameworkHint?: FrameworkHint
   } | null>(null)
 
@@ -166,6 +184,9 @@ export function CustomSourcesScreen({
   const labelInputId = useId()
 
   const resetForm = () => {
+    probeController.current?.abort()
+    probeController.current = null
+    setProbing(false)
     setInputUrl('')
     setInputName('')
     setInputLabel('')
@@ -175,6 +196,7 @@ export function CustomSourcesScreen({
     setProbeError(null)
     setProbeDiscoveredFeeds([])
     setProbeCatalogHit(null)
+    setProbedRssHub(null)
     setEditingSourceId(null)
     setShowAddModal(false)
   }
@@ -256,11 +278,12 @@ export function CustomSourcesScreen({
     setInputName(source.name)
     setInputLabel(source.label)
     setInputSiteUrl(source.siteUrl ?? '')
+    setProbedRssHub(null)
     setProbeError(null)
     setProbeDiscoveredFeeds([])
     setProbeCatalogHit(
       source.kind === 'web-catalog'
-        ? { name: source.name, extractor: '目录' }
+        ? { name: source.name, extractor: '目录', frameworkHint: source.frameworkHint, catalogProfile: source.catalogProfile }
         : null,
     )
     setShowAddModal(true)
@@ -271,14 +294,59 @@ export function CustomSourcesScreen({
     const url = rawUrl.trim()
     if (!url) return
 
+    probeController.current?.abort()
+    const controller = new AbortController()
+    probeController.current = controller
+    const timeout = setTimeout(() => controller.abort(new Error('探测超时，请稍后重试')), 25000)
     setProbing(true)
     setProbeError(null)
     setProbeDiscoveredFeeds([])
-    setProbeCatalogHit(null)
+    if (probedRssHub?.url !== url) setProbedRssHub(null)
+    // Retain the last valid configuration if re-probing fails.
 
     try {
-      const normalizedUrl = url.startsWith('http://') || url.startsWith('https://') ? url : `https://${url}`
-      const text = await fetchAbsoluteText(normalizedUrl)
+      // Logical RSSHub URIs identify routes, not HTTP origins. Resolve the exact
+      // route through the configured public instances before saving it as a feed.
+      const logical = parseRssHubLogicalInput(url)
+      if (/^rsshub:/i.test(url) && !logical) throw new Error('RSSHub 逻辑地址格式无效，请使用 rsshub://站点/路由')
+      if (logical) {
+        const result = await probeRssHubRoute(
+          logical.routePath, normalizeRssHubInstances(prefs.rsshubInstances), controller.signal,
+        )
+        if (controller.signal.aborted || probeController.current !== controller) return
+        if (result.state !== 'available' || !result.feedUrl || !result.feed) {
+          setProbeError(result.detail ?? 'RSSHub 路由暂时无法获取内容，请更换服务实例或稍后重试。')
+          return
+        }
+        setProbedRssHub({
+          url: result.feedUrl,
+          discovery: {
+            providerId: 'rsshub', entryId: 'rsshub:logical:' + logical.routePath,
+            generator: 'rsshub', routeKey: logical.routePath, instanceId: result.instanceId,
+            verification: { status: 'verified', checkedAt: result.feed.checkedAt },
+          },
+        })
+        setProbeCatalogHit(null)
+        setInputUrl(result.feedUrl)
+        if (!inputName.trim()) {
+          const name = result.feed.title || describeRssHubRoute(logical.routePath)
+          setInputName(name)
+          setInputLabel(name.slice(0, 4))
+        }
+        return
+      }
+      const probeUrl = url.startsWith('http://') || url.startsWith('https://') ? url : `https://${url}`
+      const { html: text, url: normalizedUrl } = await fetchProbeEntryPage(
+        probeUrl,
+        (candidate, onResponse) => fetchAbsoluteText(candidate, {
+          signal: controller.signal,
+          maxBytes: MAX_CATALOG_BYTES,
+          ...catalogRequestOptions(),
+          onResponse,
+        }),
+        controller.signal,
+      )
+      if (controller.signal.aborted) return
 
       // 尝试按 XML Feed 解析
       try {
@@ -311,6 +379,7 @@ export function CustomSourcesScreen({
           if (channelLink && !inputSiteUrl) {
             setInputSiteUrl(channelLink)
           }
+          setProbeCatalogHit(null)
           setInputUrl(normalizedUrl)
           return
         }
@@ -318,44 +387,30 @@ export function CustomSourcesScreen({
         // 不是直接的 XML feed，尝试从 HTML 中寻找 link rel="alternate"
       }
 
-      // 通用目录引擎：JSON-LD → 启发式卡片
-      const catalog = extractCatalog(text, normalizedUrl)
-      if (catalog.items.length > 0) {
-        const displayName = (() => {
-          try {
-            return new URL(normalizedUrl).hostname
-          } catch {
-            return '网页目录'
-          }
-        })()
-        const extractorLabel =
-          catalog.extractor === 'json-ld'
-            ? 'JSON-LD'
-            : catalog.extractor === 'heuristic-cards'
-              ? '通用卡片'
-              : '通用'
-
+      const probeSource: NewsSource = { id: editingSourceId ?? 'probe', name: inputName || new URL(normalizedUrl).hostname, label: inputLabel || '目录', group: 'custom', kind: 'web-catalog', url: normalizedUrl, enabled: true }
+      const page = await probeCatalog(probeSource, text, controller.signal)
+      if (controller.signal.aborted || probeController.current !== controller) return
+      if (page.kind === 'catalog' && page.articles.length) {
+        const displayName = probeSource.name
         const hint = detectFramework(text, normalizedUrl)
-        setProbeCatalogHit({ name: displayName, extractor: extractorLabel, frameworkHint: hint ?? undefined })
+        setProbeCatalogHit({ name: displayName, extractor: '目录', frameworkHint: hint ?? undefined, catalogProfile: page.profile })
+        const cleanDomain = getSiteCleanDomain(normalizedUrl)
         if (!inputName) {
-          setInputName(displayName)
-          setInputLabel(displayName.slice(0, 4))
+          setInputName(cleanDomain || displayName)
+          setInputLabel(cleanDomain ? cleanDomain.slice(0, 8) : displayName.slice(0, 4))
         }
-        if (!inputSiteUrl) {
-          try {
-            const parsed = new URL(normalizedUrl)
-            setInputSiteUrl(`${parsed.protocol}//${parsed.host}/`)
-          } catch {
-            // keep empty
-          }
-        }
-        setInputUrl(normalizedUrl)
+        if (!inputSiteUrl) setInputSiteUrl(page.profile.siteRoot)
+        setInputUrl(page.url)
         return
+      }
+      if (page.kind === 'blocked' || page.kind === 'dynamic' || page.kind === 'detail') {
+        throw new Error(page.kind === 'blocked' ? '来源站要求验证或限制访问，请稍后重试' : page.kind === 'dynamic' ? '来源站仅返回动态页面，暂未发现可读取的目录' : '此地址是详情页，请使用列表或栏目地址')
       }
 
       // 尝试从网页 HTML 中探测 RSS 地址
       const discovered = discoverFeedsFromHtml(text, normalizedUrl)
       if (discovered.length > 0) {
+        setProbeCatalogHit(null)
         setProbeDiscoveredFeeds(discovered)
         if (discovered[0]) {
           setInputUrl(discovered[0].url)
@@ -371,9 +426,15 @@ export function CustomSourcesScreen({
         )
       }
     } catch (err) {
-      setProbeError(err instanceof Error ? err.message : '网络请求失败，无法连接到该地址')
+      if (probeController.current === controller) {
+        const message = err instanceof Error ? err.message : '网络请求失败，无法连接到该地址'
+        setProbeError(message === 'HTTP 404'
+          ? '站点对应用的页面请求返回 HTTP 404；若浏览器正常，请检查应用代理或站点对非浏览器请求的限制。'
+          : message)
+      }
     } finally {
-      setProbing(false)
+      clearTimeout(timeout)
+      if (probeController.current === controller) setProbing(false)
     }
   }
 
@@ -381,8 +442,30 @@ export function CustomSourcesScreen({
     e?.preventDefault()
     let url = inputUrl.trim()
     if (!url) return
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      url = `https://${url}`
+    if (/^rsshub:/i.test(url)) {
+      try { parseRssHubLogicalInput(url) } catch (error) {
+        setProbeError(error instanceof Error ? error.message : 'RSSHub 逻辑地址无效')
+        return
+      }
+      setProbeError('请先点击「探测」，选择实际可用的 RSSHub 服务后再保存。')
+      return
+    }
+    if (/^[a-z][a-z\d+.-]*:/i.test(url) && !/^https?:\/\//i.test(url)) {
+      setProbeError('仅支持 HTTP、HTTPS 或 rsshub:// 订阅地址')
+      return
+    }
+    if (!/^https?:\/\//i.test(url)) url = `https://${url}`
+    try { url = validateFeedUrl(url) } catch (error) {
+      setProbeError(error instanceof Error ? error.message : '订阅地址无效')
+      return
+    }
+    const discovery = probedRssHub?.url === url ? probedRssHub.discovery : undefined
+    if (discovery && !editingSourceId) {
+      const existing = findSubscriptionDuplicate(prefs, { url, discovery })
+      if (existing) {
+        setProbeError(existing.kind === 'builtin' ? '该来源已内置，无需重复订阅。' : '该 RSSHub 路由已经订阅，无需重复添加。')
+        return
+      }
     }
     const name = inputName.trim() || url
     const label = inputLabel.trim() || name.slice(0, 4)
@@ -399,7 +482,8 @@ export function CustomSourcesScreen({
         name,
         label,
         siteUrl,
-        ...(probeCatalogHit ? { kind: 'web-catalog' as const } : {}),
+        ...(discovery ? { discovery } : {}),
+        ...(probeCatalogHit ? { kind: 'web-catalog' as const, frameworkHint: hint, catalogProfile: probeCatalogHit.catalogProfile } : {}),
       })
     } else {
       const targetCatId =
@@ -410,7 +494,8 @@ export function CustomSourcesScreen({
           label,
           url,
           siteUrl,
-          ...(probeCatalogHit ? { kind: 'web-catalog' as const } : {}),
+          ...(discovery ? { discovery } : {}),
+          ...(probeCatalogHit ? { kind: 'web-catalog' as const, frameworkHint: hint, catalogProfile: probeCatalogHit.catalogProfile } : {}),
           ...(hint ? { frameworkHint: hint } : {}),
         },
         targetCatId,
@@ -523,14 +608,24 @@ export function CustomSourcesScreen({
             完成
           </button>
         ) : (
-          <button
-            type="button"
-            onClick={openAddModal}
-            className="flex items-center gap-1 shrink-0 rounded-full border border-cinnabar bg-cinnabar/20 px-3.5 py-1.5 font-mono text-[10.5px] font-medium tracking-[0.1em] text-cinnabar-soft transition-colors hover:bg-cinnabar/30"
-          >
-            <Plus size={13} strokeWidth={2.4} />
-            添加订阅
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onOpenFeedStore}
+              className="flex items-center gap-1 shrink-0 rounded-full border border-haze px-3 py-1.5 font-mono text-[10px] text-paper-muted transition-colors hover:text-paper"
+            >
+              <Store size={12} strokeWidth={1.8} />
+              订阅商店
+            </button>
+            <button
+              type="button"
+              onClick={openAddModal}
+              className="flex items-center gap-1 shrink-0 rounded-full border border-cinnabar bg-cinnabar/20 px-3.5 py-1.5 font-mono text-[10.5px] font-medium tracking-[0.1em] text-cinnabar-soft transition-colors hover:bg-cinnabar/30"
+            >
+              <Plus size={13} strokeWidth={2.4} />
+              添加订阅
+            </button>
+          </div>
         )
       }
     >
@@ -613,7 +708,7 @@ export function CustomSourcesScreen({
       )}
 
       {/* 自建源列表 */}
-      <SettingsSection title={`自建订阅列表 (${customSources.length})`}>
+      <SettingsSection variant="plain" title={`自建订阅列表 (${customSources.length})`}>
         {customSources.length === 0 ? (
           <div className="page-x py-10 text-center">
             <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full border border-haze bg-paper/5 text-paper-faint">
@@ -841,11 +936,12 @@ export function CustomSourcesScreen({
                 <div className="mt-1.5 flex gap-2">
                   <input
                     id={urlInputId}
-                    type="url"
+                    type="text"
+                    inputMode="url"
                     required
                     value={inputUrl}
-                    onChange={(e) => setInputUrl(e.target.value)}
-                    placeholder="https://example.com/feed.xml 或 https://example.com"
+                    onChange={(e) => { probeController.current?.abort(); probeController.current = null; setProbing(false); setInputUrl(e.target.value); setProbedRssHub(null); setProbeError(null); setProbeCatalogHit(null); setProbeDiscoveredFeeds([]) }}
+                    placeholder="https://example.com/feed.xml 或 rsshub://站点/路由"
                     className="min-w-0 flex-1 rounded-xl border border-haze bg-ink-raised px-3.5 py-2.5 text-[14px] text-paper placeholder-paper-faint/45 transition-colors focus:border-cinnabar focus:outline-none"
                   />
                   <button
@@ -859,6 +955,11 @@ export function CustomSourcesScreen({
                   </button>
                 </div>
 
+                {probedRssHub && (
+                  <p role="status" className="mt-1.5 text-[11px] text-cinnabar-soft">
+                    RSSHub 已验证 · {new URL(probedRssHub.url).hostname}
+                  </p>
+                )}
                 {probeError && (
                   <p className="mt-1.5 flex items-center gap-1 font-mono text-[11px] text-rose-400">
                     <AlertCircle size={12} />
@@ -869,22 +970,20 @@ export function CustomSourcesScreen({
                 {probeCatalogHit && (
                   <div className="mt-2 rounded-xl border border-emerald-600/40 bg-emerald-900/20 p-2.5">
                     <span className="block font-mono text-[10px] text-emerald-700 dark:text-emerald-400">
-                      已识别为网页目录（{probeCatalogHit.extractor ?? '通用'}）。将重排为 App 信息流；点进条目后在
-                      Android 上嗅探播放。
+                      已发现网页目录，将显示为 App 信息流；点进条目后在应用内阅读。
                     </span>
 
-                    {probeCatalogHit.frameworkHint && (
+                    {(probeCatalogHit.catalogProfile || probeCatalogHit.frameworkHint) && (
                       <div className="mt-1.5 font-mono text-[10px] text-emerald-700 dark:text-emerald-400">
-                        已识别为 {probeCatalogHit.frameworkHint.framework.toUpperCase()}
-                        {probeCatalogHit.frameworkHint.themeVariant
+                        {(probeCatalogHit.catalogProfile?.engine ?? probeCatalogHit.frameworkHint?.framework) === 'generic' ? '使用通用目录规则' : `已识别为 ${(probeCatalogHit.catalogProfile?.engine ?? probeCatalogHit.frameworkHint?.framework)?.toUpperCase()} 站点`}
+                        {probeCatalogHit.frameworkHint?.themeVariant
                           ? ` · ${probeCatalogHit.frameworkHint.themeVariant} 主题`
                           : ''}
-                        {' '}站点
-                        {probeCatalogHit.frameworkHint.categories?.length
-                          ? ` · ${probeCatalogHit.frameworkHint.categories.length} 个分类`
+                        {probeCatalogHit.catalogProfile?.categories.length
+                          ? ` · ${probeCatalogHit.catalogProfile.categories.length} 个分类`
                           : ''}
-                        {probeCatalogHit.frameworkHint.searchTemplate ? ' · 支持站内搜索' : ''}
-                        {probeCatalogHit.frameworkHint.sortOptions?.length
+                        {probeCatalogHit.catalogProfile?.search ? ' · 支持站内搜索' : ''}
+                        {probeCatalogHit.catalogProfile?.sorts?.length
                           ? ' · 支持排序'
                           : ''}
                       </div>

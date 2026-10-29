@@ -8,8 +8,17 @@ import { collectAudioSrc, isAudioMediaUrl } from '../articleAudio'
 import { feedArticleId } from '../articleId'
 import { normalizeArticleTitle } from '../articleTitle'
 import { cleanSummaryText } from '../cleanSummary'
+import { firstImageIn, previewImageUrl } from '../articlePreview'
+import {
+  extractDirectVideoUrlFromHtml,
+  extractEmbeddedVideoPageUrl,
+  isDirectVideoMediaUrl,
+  isLikelyEmbeddedVideoPageUrl,
+} from '../videoArticle'
 import type { NewsSource } from '../../sources/registry'
 import type { Article } from '../types'
+
+export { firstImageIn } from '../articlePreview'
 
 export type Unknown = Record<string, unknown>
 
@@ -59,11 +68,6 @@ export function stripTags(html: string): string {
     .replace(/&gt;/gi, '>')
     .replace(/\s+/g, ' ')
     .trim()
-}
-
-export function firstImageIn(html: string): string | undefined {
-  const match = html.match(/<img[^>]+src=["']([^"']+)["']/i)
-  return match?.[1]
 }
 
 export function attr(value: unknown, name: string): string | undefined {
@@ -158,37 +162,101 @@ export function audioUrlFromNode(node: Unknown, html: string): string | undefine
   return collectAudioSrc(html)
 }
 
-export function imageOf(node: Unknown, html: string): string | undefined {
-  const candidates: Array<string | undefined> = []
+export function videoMediaFromNode(
+  node: Unknown,
+  html: string,
+): { directUrl?: string; playerPageUrl?: string; declaredByFeed: boolean } {
+  let playerPageUrl: string | undefined
+  let declaredByFeed = false
+
   for (const rec of enclosureRecords(node)) {
     const url = httpUrl(rec['@_url'])
     const type = typeof rec['@_type'] === 'string' ? rec['@_type'] : ''
-    if (url && !isAudioMediaUrl(url, type) && !/^video\//i.test(type)) {
-      candidates.push(url)
+    if (url && isDirectVideoMediaUrl(url, type)) return { directUrl: url, playerPageUrl, declaredByFeed: true }
+    if (url && /^text\/html\b/i.test(type) && isLikelyEmbeddedVideoPageUrl(url)) {
+      playerPageUrl ??= url
+      declaredByFeed = true
     }
   }
-  candidates.push(
-    attr(node.thumbnail, '@_url'),
-    attr(node.content, '@_url'),
-    attr(node.image, '@_url'),
-    attr(node.image, '@_href'),
-    text(asRecord(node.image)?.url),
-  )
+
+  for (const raw of toArray(node.link)) {
+    const rec = asRecord(raw)
+    if (!rec) continue
+    const rel = String(rec['@_rel'] || '')
+    const href = httpUrl(rec['@_href'])
+    const type = typeof rec['@_type'] === 'string' ? rec['@_type'] : ''
+    if (href && rel === 'enclosure' && isDirectVideoMediaUrl(href, type)) {
+      return { directUrl: href, playerPageUrl, declaredByFeed: true }
+    }
+    if (
+      href &&
+      rel === 'enclosure' &&
+      /^text\/html\b/i.test(type) &&
+      isLikelyEmbeddedVideoPageUrl(href)
+    ) {
+      playerPageUrl ??= href
+      declaredByFeed = true
+    }
+  }
+
   for (const raw of toArray(node.attachments)) {
     const rec = asRecord(raw)
     if (!rec) continue
     const url = httpUrl(text(rec.url))
     const type = text(rec.mime_type) || text(rec.mimeType)
-    if (
-      url &&
-      !isAudioMediaUrl(url, type) &&
-      (/^image\//i.test(type) || /\.(?:png|jpe?g|gif|webp)(?:$|[?#])/i.test(url))
-    ) {
-      candidates.push(url)
+    if (url && isDirectVideoMediaUrl(url, type)) return { directUrl: url, playerPageUrl, declaredByFeed: true }
+    if (url && /^text\/html\b/i.test(type) && isLikelyEmbeddedVideoPageUrl(url)) {
+      playerPageUrl ??= url
+      declaredByFeed = true
     }
   }
-  const direct = candidates.find((value) => httpUrl(value))
-  return direct ?? firstImageIn(html)
+
+  return {
+    directUrl: extractDirectVideoUrlFromHtml(html),
+    playerPageUrl: playerPageUrl ?? extractEmbeddedVideoPageUrl(html),
+    declaredByFeed,
+  }
+}
+
+export function imageOf(node: Unknown, html: string, baseUrl?: string): string | undefined {
+  const candidates: unknown[] = []
+  // Media RSS puts thumbnails either on the item or inside media:group/content.
+  const collectMedia = (record: Unknown) => {
+    candidates.push(...toArray(record.thumbnail).map((entry) => asRecord(entry)?.['@_url']))
+    for (const raw of toArray(record.content)) {
+      const content = asRecord(raw)
+      if (!content) continue
+      candidates.push(attr(content.thumbnail, '@_url'))
+      const type = text(content['@_type'])
+      const medium = text(content['@_medium'])
+      if ((!type || /^image\//i.test(type)) && (!medium || medium === 'image')) candidates.push(content['@_url'])
+    }
+  }
+  collectMedia(node)
+  for (const raw of toArray(node.group)) {
+    const group = asRecord(raw)
+    if (group) collectMedia(group)
+  }
+  candidates.push(attr(node.image, '@_url'), attr(node.image, '@_href'), text(asRecord(node.image)?.url), text(node.image), text(node.thumbnail))
+  for (const raw of toArray(node.link)) {
+    const link = asRecord(raw)
+    if (link?.['@_rel'] === 'enclosure' && /^image\//i.test(text(link['@_type']))) candidates.push(link['@_href'])
+  }
+  for (const rec of enclosureRecords(node)) {
+    const type = text(rec['@_type'])
+    if (!type || /^image\//i.test(type)) candidates.push(rec['@_url'])
+  }
+  for (const raw of toArray(node.attachments)) {
+    const rec = asRecord(raw)
+    if (!rec) continue
+    const type = text(rec.mime_type) || text(rec.mimeType)
+    if (!type || /^image\//i.test(type)) candidates.push(rec.url)
+  }
+  for (const candidate of candidates) {
+    const url = previewImageUrl(candidate, baseUrl)
+    if (url && !isAudioMediaUrl(url) && !isDirectVideoMediaUrl(url) && !isLikelyEmbeddedVideoPageUrl(url)) return url
+  }
+  return firstImageIn(html, baseUrl)
 }
 
 export function buildArticle(
@@ -201,6 +269,7 @@ export function buildArticle(
     dateRaw: string
     image?: string
     contentType?: Article['contentType']
+    feedBodyEvidence?: Article['feedBodyEvidence']
     videoUrl?: string
     audioUrl?: string
     neteaseDocId?: string
@@ -220,6 +289,7 @@ export function buildArticle(
     title,
     summary,
     contentHtml: raw.html && raw.html.includes('<') ? raw.html : undefined,
+    feedBodyEvidence: raw.feedBodyEvidence,
     image: raw.image,
     publishedAt: published ?? fetchedAt,
     hasRealDate: published != null,

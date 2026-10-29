@@ -18,6 +18,7 @@ export type LogNamespace =
   | 'http'
   | 'proxy'
   | 'reader'
+  | 'readAloud'
   | 'sniffer'
   | 'storage'
   | 'sync'
@@ -48,6 +49,19 @@ export interface LogController {
 
 const LOG_STORAGE_KEY = 'newsnook:log'
 
+let privateBrowserScopes = 0
+
+/** Suppress page diagnostics while private browser work is active, without changing saved settings. */
+export function suppressBrowserLogs(): () => void {
+  privateBrowserScopes++
+  let released = false
+  return () => {
+    if (released) return
+    released = true
+    privateBrowserScopes--
+  }
+}
+
 const LEVEL_RANK: Record<LogLevel, number> = {
   silent: 0,
   error: 1,
@@ -66,6 +80,7 @@ const ALL_NAMESPACES: LogNamespace[] = [
   'http',
   'proxy',
   'reader',
+  'readAloud',
   'sniffer',
   'storage',
   'sync',
@@ -179,6 +194,7 @@ function namespaceEnabled(config: LogConfig, namespace: LogNamespace): boolean {
 }
 
 function shouldEmit(config: LogConfig, level: LogLevel, namespace: LogNamespace): boolean {
+  if (privateBrowserScopes > 0) return false
   if (!namespaceEnabled(config, namespace)) return false
   return LEVEL_RANK[level] <= LEVEL_RANK[config.level]
 }
@@ -264,6 +280,7 @@ export const log = {
   http: createLogger('http'),
   proxy: createLogger('proxy'),
   reader: createLogger('reader'),
+  readAloud: createLogger('readAloud'),
   sniffer: createLogger('sniffer'),
   storage: createLogger('storage'),
   sync: createLogger('sync'),

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type MutableRefObject } from 'react'
+import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 'react'
 import { X } from 'lucide-react'
 
 import {
@@ -10,6 +10,7 @@ import {
 import { reduceLiveObservations } from '../features/mediaSniffer/liveCandidate'
 import type { MediaDescriptor, MediaObservation } from '../features/mediaSniffer/types'
 import { InkVideoPlayer, type InkVideoPlayerFullscreenHandle } from './InkVideoPlayer'
+import { useHasGlobalVideoSurface } from '../features/floatingVideo/context'
 
 type Mode = 'origin' | 'custom'
 
@@ -63,6 +64,7 @@ function pushLiveSessionBounds(
   el: HTMLElement,
   lastKeyRef: { current: string },
   force = false,
+  sessionId?: string,
 ): void {
   const rect = el.getBoundingClientRect()
   if (rect.width < 8 || rect.height < 8) return
@@ -80,6 +82,7 @@ function pushLiveSessionBounds(
     width: rect.width,
     height: rect.height,
     cornerRadius: SLOT_CORNER_RADIUS_PX,
+    sessionId,
   })
 }
 
@@ -98,13 +101,19 @@ export function OriginPlayerSurface({
   autoUseReader = false,
   embedded = false,
 }: Props) {
+  const globalVideoSurface = useHasGlobalVideoSurface()
   const [mode, setMode] = useState<Mode>('origin')
   const [candidate, setCandidate] = useState<MediaDescriptor | null>(null)
+  // Live ranking feeds the resource picker; playback stays on the chosen snapshot.
+  const [activeCandidate, setActiveCandidate] = useState<MediaDescriptor | null>(null)
+  const handoffVersionRef = useRef<object>({})
+  const preparingRef = useRef(false)
   const [sessionError, setSessionError] = useState<string | null>(null)
   const observationsRef = useRef<MediaObservation[]>([])
   const slotRef = useRef<HTMLDivElement | null>(null)
   const lastBoundsKeyRef = useRef('')
   const sessionReadyRef = useRef(false)
+  const sessionIdRef = useRef<string | undefined>(undefined)
   const playerFullscreenRef = useRef<InkVideoPlayerFullscreenHandle | null>(null)
   const autoSwitchedRef = useRef(false)
 
@@ -118,12 +127,15 @@ export function OriginPlayerSurface({
           return true
         }
         if (mode !== 'custom') return false
+        handoffVersionRef.current = {}
+        preparingRef.current = false
+        setActiveCandidate(null)
         setMode('origin')
-        void setNativeLiveSessionVisible(true)
+        if (sessionIdRef.current) void setNativeLiveSessionVisible(true, sessionIdRef.current)
         lastBoundsKeyRef.current = ''
         const el = slotRef.current
         if (el && sessionReadyRef.current) {
-          pushLiveSessionBounds(el, lastBoundsKeyRef, true)
+          pushLiveSessionBounds(el, lastBoundsKeyRef, true, sessionIdRef.current)
         }
         return true
       },
@@ -139,16 +151,20 @@ export function OriginPlayerSurface({
     const lateTimers: number[] = []
     observationsRef.current = []
     autoSwitchedRef.current = false
+    handoffVersionRef.current = {}
+    preparingRef.current = false
+    setActiveCandidate(null)
     setCandidate(null)
     setSessionError(null)
     setMode('origin')
     sessionReadyRef.current = false
+    sessionIdRef.current = undefined
     lastBoundsKeyRef.current = ''
 
     const syncAfterNativeReady = () => {
       const el = slotRef.current
       if (!el || stopped) return
-      pushLiveSessionBounds(el, lastBoundsKeyRef, true)
+      pushLiveSessionBounds(el, lastBoundsKeyRef, true, sessionIdRef.current)
     }
 
     void startNativeLiveSniffSession({
@@ -167,6 +183,7 @@ export function OriginPlayerSurface({
           return
         }
         stopSession = session.stop
+        sessionIdRef.current = session.sessionId
         // Native WebView starts off-screen; bounds calls before this are no-ops.
         sessionReadyRef.current = true
         syncAfterNativeReady()
@@ -184,7 +201,10 @@ export function OriginPlayerSurface({
 
     return () => {
       stopped = true
+      handoffVersionRef.current = {}
+      preparingRef.current = false
       sessionReadyRef.current = false
+      sessionIdRef.current = undefined
       for (const id of lateTimers) window.clearTimeout(id)
       void stopSession?.()
     }
@@ -196,7 +216,7 @@ export function OriginPlayerSurface({
     const syncBounds = () => {
       const el = slotRef.current
       if (!el || !sessionReadyRef.current) return
-      pushLiveSessionBounds(el, lastBoundsKeyRef)
+      pushLiveSessionBounds(el, lastBoundsKeyRef, false, sessionIdRef.current)
     }
 
     lastBoundsKeyRef.current = ''
@@ -223,54 +243,69 @@ export function OriginPlayerSurface({
     }
   }, [mode, pageUrl])
 
-  const openCustom = async () => {
-    if (!candidate) return
-    await prepareNativeMediaPlayback({
-      url: candidate.url,
-      sourcePage: candidate.pageUrl,
-      format: candidate.type,
-      headers: candidate.requestHeaders,
-      origins: candidate.origins,
-      extraUrls: candidate.relatedUrls,
-    }).catch(() => undefined)
-    await setNativeLiveSessionVisible(false)
-    setMode('custom')
-  }
+  const openCustom = useCallback(async () => {
+    if (!candidate || preparingRef.current) return
+    const chosen = candidate
+    const version = handoffVersionRef.current
+    preparingRef.current = true
+    try {
+      await prepareNativeMediaPlayback({
+        url: chosen.url,
+        sourcePage: chosen.pageUrl,
+        format: chosen.type,
+        headers: chosen.requestHeaders,
+        origins: chosen.origins,
+        extraUrls: chosen.relatedUrls,
+      }).catch(() => undefined)
+      if (version !== handoffVersionRef.current) return
+      if (sessionIdRef.current) await setNativeLiveSessionVisible(false, sessionIdRef.current)
+      if (version !== handoffVersionRef.current) return
+      setActiveCandidate(chosen)
+      setMode('custom')
+    } finally {
+      if (version === handoffVersionRef.current) preparingRef.current = false
+    }
+  }, [candidate])
 
   useEffect(() => {
     if (!autoUseReader || !candidate || mode !== 'origin' || autoSwitchedRef.current) return
     autoSwitchedRef.current = true
     void openCustom()
-  // openCustom intentionally captures the current candidate; candidate/mode changes retrigger this effect.
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [autoUseReader, candidate, mode])
+  }, [autoUseReader, candidate, mode, openCustom])
 
   const backToOrigin = () => {
+    handoffVersionRef.current = {}
+    preparingRef.current = false
+    setActiveCandidate(null)
     setMode('origin')
-    void setNativeLiveSessionVisible(true)
+    if (sessionIdRef.current) void setNativeLiveSessionVisible(true, sessionIdRef.current)
     lastBoundsKeyRef.current = ''
     const el = slotRef.current
     if (el && sessionReadyRef.current) {
-      pushLiveSessionBounds(el, lastBoundsKeyRef, true)
+      pushLiveSessionBounds(el, lastBoundsKeyRef, true, sessionIdRef.current)
     }
   }
 
   return (
     <div className={embedded ? 'w-full' : 'mt-5 page-x lg:px-8'}>
       <div className="overflow-hidden rounded-xl border border-haze bg-ink-raised/80">
-        <div ref={slotRef} className="relative aspect-video w-full bg-[#0c0d10]">
-          {mode === 'custom' && candidate ? (
+        <div
+          ref={slotRef}
+          className={`relative w-full bg-[#0c0d10] ${mode === 'origin' ? 'reader-video-aspect' : ''}`}
+        >
+          {mode === 'origin' && globalVideoSurface && <div className="reader-video-aspect flex items-center justify-center px-6 text-center text-[12px] text-paper-muted">关闭悬浮后可使用原站播放器</div>}
+          {mode === 'custom' && activeCandidate ? (
             <InkVideoPlayer
-              src={candidate.url}
+              autoPlay={!autoUseReader}
+              src={activeCandidate.url}
               poster={poster}
               title={title}
-              format={candidate.type}
-              sourcePage={candidate.pageUrl}
-              requestHeaders={candidate.requestHeaders}
-              extraUrls={candidate.relatedUrls}
-              resources={candidate.resources}
+              format={activeCandidate.type}
+              sourcePage={activeCandidate.pageUrl}
+              requestHeaders={activeCandidate.requestHeaders}
+              extraUrls={activeCandidate.relatedUrls}
+              resources={candidate?.resources ?? activeCandidate.resources}
               onRefreshSource={backToOrigin}
-              onPlaybackError={backToOrigin}
               fullscreenHandleRef={playerFullscreenRef}
               suppressResourceFab={suppressResourceFab}
             />
@@ -309,13 +344,13 @@ export function OriginPlayerSurface({
                       onClick={() => void openCustom()}
                       className="shrink-0 rounded-lg bg-cinnabar px-3 py-1.5 font-mono text-[11px] font-medium text-white hover:bg-cinnabar-soft active:scale-95 transition-all"
                     >
-                      用阅读器播放
+                      切换播放器
                     </button>
                     <button
                       type="button"
                       onClick={() => void openCustom()}
-                      aria-label="关闭原站并使用阅读器播放"
-                      title="关闭原站并使用阅读器播放"
+                      aria-label="关闭原站并切换播放器"
+                      title="关闭原站并切换播放器"
                       className="shrink-0 rounded-lg p-1.5 text-paper-muted hover:bg-ink hover:text-paper active:scale-95 transition-all"
                     >
                       <X size={15} strokeWidth={2} />

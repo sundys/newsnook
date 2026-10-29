@@ -1,13 +1,16 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type MutableRefObject, type RefObject } from 'react'
 import { Browser } from '@capacitor/browser'
 import { Capacitor } from '@capacitor/core'
-import { ArrowLeft, BookmarkCheck, BookmarkPlus, Globe, Languages, LoaderCircle, MessageSquare, MoreHorizontal, RefreshCw, ScrollText, X } from 'lucide-react'
+import { ArrowLeft, BookmarkCheck, BookmarkPlus, ChevronDown, Globe, Languages, LoaderCircle, MessageSquare, MoreHorizontal, RefreshCw, ScrollText, Volume2, X } from 'lucide-react'
 
 import { AiSpeedReadPanel } from '../components/AiSpeedReadPanel'
 import { ImageLightbox } from '../components/ImageLightbox'
+import { collectImageGallery, type ImageGallery } from '../lib/imageGallery'
 import { EinkReaderMenu } from '../components/EinkReaderMenu'
 import { ReaderMoreMenu } from '../components/ReaderMoreMenu'
 import { ReaderScrollIndicator } from '../components/ReaderScrollIndicator'
+import { ReaderTranslationBar } from '../components/ReaderTranslationBar'
+import { ReaderTranslationMenu, type ReaderTranslationMode } from '../components/ReaderTranslationMenu'
 import { ShareArticleSheet } from '../components/ShareArticleSheet'
 import { InkAudioPlayer } from '../components/InkAudioPlayer'
 import { InkImage } from '../components/InkImage'
@@ -22,6 +25,8 @@ import {
 import { shouldUseOriginPlayerSurface } from '../features/mediaSniffer/originPlayerGate'
 import { loadPrestoredBody } from '../features/prestore/store'
 import { loadCachedBody, saveCachedBody } from '../lib/bodyCache'
+import { withArticlePreviewImage } from '../lib/articlePreview'
+import { log } from '../lib/logger'
 import { addVolumePageTurnListener, setVolumePageTurnEnabled } from '../lib/volumePageTurn'
 import { useEdgeSwipeBack } from '../hooks/useEdgeSwipeBack'
 import { useNetworkStatus } from '../hooks/useNetworkStatus'
@@ -29,6 +34,7 @@ import { usePagedReader } from '../hooks/usePagedReader'
 import { useProgressiveImages } from '../hooks/useProgressiveImages'
 import { useReaderFontPinch } from '../hooks/useReaderFontPinch'
 import { useReducedMotion } from '../hooks/useReducedMotion'
+import { useStartupBlocker } from '../hooks/useStartupReadiness'
 import { revokeBlobUrl } from '../features/proxy/hydrateImages'
 import { deferMediaInHtml, DEFERRED_SRC_ATTR, type DeferredHostPhase } from '../lib/deferReaderMedia'
 import { stageYoutubeEmbedsInHtml } from '../lib/youtubeEmbeds'
@@ -55,7 +61,10 @@ import {
 } from '../lib/shareLink'
 import { resolveArticleBody, type BodySource } from '../lib/resolveBody'
 import { articleCoverUrl } from '../lib/articleAudio'
+import { isExcerptUpgrade, shouldRecheckCachedExcerpt, shouldReplaceCachedBody } from '../lib/feedBodyEvidence'
+import { shouldRenderStandaloneCover } from '../lib/articlePreview'
 import { articleRelativeTime } from '../lib/time'
+import { extractEmbeddedVideoPageUrl } from '../lib/videoArticle'
 import type { Article } from '../lib/types'
 import type { TypographyPrefs } from '../sources/preferences'
 import { resolveAiFeatureConfig } from '../features/translation/aiConfig'
@@ -65,9 +74,17 @@ import {
   translationLanguageLabel,
   translationProviderLabel,
 } from '../features/translation/config'
-import type { TranslatedArticleContent, TranslationPrefs } from '../features/translation/types'
+import type {
+  TranslatedArticleContent,
+  TranslationDisplayMode,
+  TranslationPrefs,
+} from '../features/translation/types'
 import { hasSpeedReadableText } from '../features/speedRead/service'
 import { useSpeedRead } from '../features/speedRead/useSpeedRead'
+import { ReadAloudBar } from '../features/readAloud/ReadAloudBar'
+import { segmentArticle } from '../features/readAloud/segmenter'
+import { useReadAloud } from '../features/readAloud/useReadAloud'
+import type { ReadAloudPrefs } from '../features/readAloud/types'
 import { fetchCommentCount, supportsComments } from '../features/comments/service'
 import { CommentsDrawer } from '../features/comments/components/CommentsDrawer'
 import { articleFromRelatedLink } from '../features/catalogEngine/toArticles'
@@ -79,10 +96,13 @@ interface Props {
   saved: boolean
   onClose: () => void
   onToggleLater: (article: Article) => void
-  onCacheChange: () => void
+  onCacheChange: (article?: Article) => void
   /** 返回 true 表示已消费系统返回（例如关闭大图），供 App 回退栈使用 */
   overlayCloserRef?: MutableRefObject<(() => boolean) | null>
   translationPrefs: TranslationPrefs
+  onTranslationPrefsChange?: (patch: Partial<TranslationPrefs>) => void
+  onOpenTranslationSettings?: () => void
+  readAloudPrefs: ReadAloudPrefs
   customSources?: NewsSource[]
   /** 墨水屏模式：分页阅读；false/缺省时保持滚动阅读 */
   einkMode?: boolean
@@ -95,6 +115,8 @@ interface Props {
   onOpenRelated?: (article: Article) => void
   /** Android：仅 Wi-Fi 自动加载阅读页媒体 */
   wifiOnlyAutoLoadMedia?: boolean
+  /** A covering browser owns the initial surface while this reader restores in the background. */
+  startupVisible?: boolean
 }
 
 type LoadState = 'loading' | 'ready' | 'error'
@@ -107,6 +129,9 @@ export function ReaderScreen({
   onCacheChange,
   overlayCloserRef,
   translationPrefs,
+  onTranslationPrefsChange,
+  onOpenTranslationSettings,
+  readAloudPrefs,
   customSources,
   einkMode = false,
   fontScale = 1,
@@ -114,6 +139,7 @@ export function ReaderScreen({
   onOpenSettings,
   onOpenRelated,
   wifiOnlyAutoLoadMedia = false,
+  startupVisible = true,
 }: Props) {
   const reduced = useReducedMotion()
   const { connectionType } = useNetworkStatus()
@@ -128,6 +154,10 @@ export function ReaderScreen({
     sourceId: article.sourceId,
     contentType: article.contentType,
   })
+  const feedEmbeddedPlayerUrl = useMemo(
+    () => article.contentType === 'video' ? extractEmbeddedVideoPageUrl(article.contentHtml) : undefined,
+    [article.contentHtml, article.contentType],
+  )
   const [loadState, setLoadState] = useState<LoadState>('loading')
   const [html, setHtml] = useState('')
   const [bodySource, setBodySource] = useState<BodySource | null>(null)
@@ -135,13 +165,21 @@ export function ReaderScreen({
   const [resolvedTitle, setResolvedTitle] = useState<string | undefined>()
   const [error, setError] = useState<string | null>(null)
   const [fromCache, setFromCache] = useState(false)
+  const [excerptSavedAt, setExcerptSavedAt] = useState<number | null>(null)
+  const [lastReconnectAt, setLastReconnectAt] = useState(0)
+  const lastConnectionTypeRef = useRef<string | null>(null)
+  const excerptAttemptRef = useRef<{ id: string; at: number } | null>(null)
   const [retryToken, setRetryToken] = useState(0)
+  const [localBodyRestoredFor, setLocalBodyRestoredFor] = useState<string | null>(null)
+  const localBodyRestorePending = retryToken === 0 && article.contentType !== 'video' &&
+    localBodyRestoredFor !== article.id
+  useStartupBlocker(startupVisible && localBodyRestorePending)
   const [unlockedMediaUrls, setUnlockedMediaUrls] = useState<string[]>([])
   const [mediaPlayables, setMediaPlayables] = useState<Record<string, string>>({})
   const mediaPlayablesRef = useRef(mediaPlayables)
   mediaPlayablesRef.current = mediaPlayables
   const [deferredPhases, setDeferredPhases] = useState<Record<string, DeferredHostPhase>>({})
-  const [lightbox, setLightbox] = useState<{ src: string; alt: string } | null>(null)
+  const [lightbox, setLightbox] = useState<ImageGallery | null>(null)
   const [commentsOpen, setCommentsOpen] = useState(false)
   const [commentCount, setCommentCount] = useState<number | undefined>()
   const [translated, setTranslated] = useState<TranslatedArticleContent | null>(null)
@@ -152,6 +190,34 @@ export function ReaderScreen({
   const pendingPartialRef = useRef<TranslatedArticleContent | null>(null)
   const partialFrameRef = useRef(0)
   const [exportingMarkdown, setExportingMarkdown] = useState(false)
+  const [activeDisplayMode, setActiveDisplayMode] = useState<TranslationDisplayMode>(
+    translationPrefs.displayMode,
+  )
+  const [translationMenuOpen, setTranslationMenuOpen] = useState(false)
+  const [translationBarDismissed, setTranslationBarDismissed] = useState(false)
+
+  useEffect(() => {
+    setActiveDisplayMode(translationPrefs.displayMode)
+  }, [translationPrefs.displayMode])
+
+  const currentTranslationMode: ReaderTranslationMode = !showTranslation
+    ? 'original'
+    : activeDisplayMode === 'compare'
+      ? 'compare'
+      : 'replace'
+
+  const handleSelectTranslationMode = useCallback(
+    (mode: ReaderTranslationMode) => {
+      if (mode === 'original') {
+        setShowTranslation(false)
+      } else {
+        setActiveDisplayMode(mode)
+        setShowTranslation(true)
+        onTranslationPrefsChange?.({ displayMode: mode })
+      }
+    },
+    [onTranslationPrefsChange],
+  )
 
   const canComment = useMemo(
     () => supportsComments({ ...article, originUrl: resolvedOriginUrl || article.originUrl }),
@@ -235,6 +301,16 @@ export function ReaderScreen({
 
   useEffect(() => {
     if (!overlayCloserRef) return
+    if (translationMenuOpen) {
+      const prev = overlayCloserRef.current
+      overlayCloserRef.current = () => {
+        setTranslationMenuOpen(false)
+        return true
+      }
+      return () => {
+        overlayCloserRef.current = prev
+      }
+    }
     if (shareSheetOpen) {
       const prev = overlayCloserRef.current
       overlayCloserRef.current = () => {
@@ -275,7 +351,14 @@ export function ReaderScreen({
         overlayCloserRef.current = prev
       }
     }
-  }, [commentsOpen, einkMenuOpen, moreMenuOpen, overlayCloserRef, shareSheetOpen])
+  }, [
+    commentsOpen,
+    einkMenuOpen,
+    moreMenuOpen,
+    overlayCloserRef,
+    shareSheetOpen,
+    translationMenuOpen,
+  ])
 
   const handleScroll = useCallback(() => {
     if (einkMode) return
@@ -483,7 +566,7 @@ export function ReaderScreen({
       const src = target.currentSrc || target.src
       if (!src) return
       event.preventDefault()
-      setLightbox({ src, alt: target.alt || '' })
+      setLightbox(collectImageGallery(root, { src, alt: target.alt || '' }))
     }
 
     root.addEventListener('click', onClick)
@@ -514,7 +597,6 @@ export function ReaderScreen({
     setTranslationError('')
   }, [
     article.id,
-    translationPrefs.displayMode,
     translationPrefs.provider,
     translationPrefs.sourceLanguage,
     translationPrefs.targetLanguage,
@@ -540,11 +622,13 @@ export function ReaderScreen({
     // 正文内容是静态的，命中缓存直接出，断网也能重读；重新抽取时才绕过
     if (retryToken === 0 && article.contentType !== 'video') {
       const cached = loadCachedBody(article.id)
-      if (cached) {
+      if (cached && !shouldReplaceCachedBody(article, cached)) {
         setHtml(cached.html)
         setBodySource(cached.bodySource)
+        setExcerptSavedAt(cached.bodySource === 'feed-excerpt' ? cached.savedAt : null)
         setFromCache(true)
         setLoadState('ready')
+        setLocalBodyRestoredFor(article.id)
         restoreTitle(cached.article)
         if (!cached.article) {
           saveCachedBody(article, {
@@ -552,7 +636,7 @@ export function ReaderScreen({
             bodySource: cached.bodySource,
           })
         }
-        onCacheChange()
+        onCacheChange(withArticlePreviewImage(article, cached.html, cached.article?.image))
         return () => controller.abort()
       }
     }
@@ -560,11 +644,14 @@ export function ReaderScreen({
     setLoadState('loading')
     setHtml('')
     setBodySource(null)
+    setExcerptSavedAt(null)
     setResolvedOriginUrl(undefined)
     setResolvedTitle(undefined)
     setFromCache(false)
 
     const loadFromNetwork = () => {
+      // Startup waits for local recovery, never for an upstream network response.
+      setLocalBodyRestoredFor(article.id)
       void resolveArticleBody(
         retryToken > 0 && article.videoUrl
           ? { ...article, videoUrl: undefined }
@@ -577,11 +664,13 @@ export function ReaderScreen({
           setHtml(resolved.contentHtml)
           setResolvedTitle(resolved.title)
           if (resolved.bodySource !== 'video') {
-            const cached = saveCachedBody(withResolvedShareTitle(article, resolved.title), {
+            const previewArticle = withArticlePreviewImage(withResolvedShareTitle(article, resolved.title), resolved.contentHtml, resolved.image)
+            const cached = saveCachedBody(previewArticle, {
               html: resolved.contentHtml,
               bodySource: resolved.bodySource,
             })
-            if (cached) onCacheChange()
+            onCacheChange(previewArticle)
+            if (!cached) log.storage.warn('Reader body cache write failed', article.id)
           }
         },
       )
@@ -589,16 +678,19 @@ export function ReaderScreen({
           if (controller.signal.aborted) return
           setHtml(resolved.contentHtml)
           setBodySource(resolved.bodySource)
+          setExcerptSavedAt(resolved.bodySource === 'feed-excerpt' ? Date.now() : null)
           setResolvedOriginUrl(resolved.resolvedOriginUrl)
           setResolvedTitle(resolved.title)
           setLoadState('ready')
           // 视频稿正文只是占位文案，缓存没有意义
           if (resolved.bodySource !== 'video') {
-            const cached = saveCachedBody(withResolvedShareTitle(article, resolved.title), {
+            const previewArticle = withArticlePreviewImage(withResolvedShareTitle(article, resolved.title), resolved.contentHtml, resolved.image)
+            const cached = saveCachedBody(previewArticle, {
               html: resolved.contentHtml,
               bodySource: resolved.bodySource,
             })
-            if (cached) onCacheChange()
+            onCacheChange(previewArticle)
+            if (!cached) log.storage.warn('Reader body cache write failed', article.id)
           }
         })
         .catch((err: unknown) => {
@@ -612,14 +704,25 @@ export function ReaderScreen({
     if (retryToken === 0 && article.contentType !== 'video') {
       void loadPrestoredBody(article.id).then((prestored) => {
         if (controller.signal.aborted) return
-        if (prestored) {
+        if (prestored && !shouldReplaceCachedBody(article, prestored)) {
           setHtml(prestored.html)
           setBodySource(prestored.bodySource)
+          setExcerptSavedAt(prestored.bodySource === 'feed-excerpt' ? prestored.savedAt : null)
           setFromCache(true)
           setLoadState('ready')
+          setLocalBodyRestoredFor(article.id)
           restoreTitle(prestored.article)
+          const previewArticle = withArticlePreviewImage(withResolvedShareTitle(article, prestored.article.title), prestored.html, prestored.article.image)
+          if (prestored.bodySource !== 'feed-excerpt') {
+            saveCachedBody(previewArticle, { html: prestored.html, bodySource: prestored.bodySource })
+          }
+          onCacheChange(previewArticle)
           return
         }
+        loadFromNetwork()
+      }).catch((error: unknown) => {
+        if (controller.signal.aborted) return
+        log.storage.warn('Reader prestored body restore failed', article.id, error)
         loadFromNetwork()
       })
     } else {
@@ -629,13 +732,60 @@ export function ReaderScreen({
     return () => controller.abort()
   }, [article, customSources, onCacheChange, retryToken])
 
+  // Offline-first: show a cached, unconfirmed excerpt immediately. Retry it
+  // quietly when stale or on reconnection; never turn a transient failure into
+  // a blank reader or an endless refetch loop.
+  useEffect(() => {
+    const onOnline = () => setLastReconnectAt(Date.now())
+    window.addEventListener('online', onOnline)
+    return () => window.removeEventListener('online', onOnline)
+  }, [])
+  useEffect(() => {
+    if (lastConnectionTypeRef.current === 'none' && connectionType && connectionType !== 'none') {
+      setLastReconnectAt(Date.now())
+    }
+    lastConnectionTypeRef.current = connectionType
+  }, [connectionType])
+  useEffect(() => {
+    if (retryToken !== 0 || loadState !== 'ready' || bodySource !== 'feed-excerpt' ||
+        excerptSavedAt === null || connectionType === 'none' ||
+        (typeof navigator !== 'undefined' && navigator.onLine === false)) return
+    const now = Date.now()
+    if (!shouldRecheckCachedExcerpt(bodySource, excerptSavedAt, now, lastReconnectAt > excerptSavedAt)) return
+    const previous = excerptAttemptRef.current
+    if (previous?.id === article.id && now - previous.at < 2 * 60_000) return
+    excerptAttemptRef.current = { id: article.id, at: now }
+    const controller = new AbortController()
+    void resolveArticleBody(article, controller.signal, customSources).then((resolved) => {
+      if (controller.signal.aborted || !isExcerptUpgrade(html, resolved)) return
+      const newer = loadCachedBody(article.id)
+      if (newer && newer.bodySource !== 'feed-excerpt') return
+      const updated = withArticlePreviewImage(withResolvedShareTitle(article, resolved.title), resolved.contentHtml, resolved.image)
+      saveCachedBody(updated, { html: resolved.contentHtml, bodySource: resolved.bodySource })
+      setHtml(resolved.contentHtml)
+      setBodySource(resolved.bodySource)
+      setExcerptSavedAt(null)
+      setFromCache(false)
+      setResolvedOriginUrl(resolved.resolvedOriginUrl)
+      setResolvedTitle(resolved.title)
+      onCacheChange(updated)
+    }).catch(() => { /* keep the readable, cached excerpt and try after cooldown */ })
+    return () => controller.abort()
+  }, [article, bodySource, connectionType, customSources, excerptSavedAt, html, loadState, onCacheChange, lastReconnectAt, retryToken])
+
   useEffect(() => {
     if (loadState === 'ready') {
       revealReader(rootRef.current, reduced)
     }
   }, [article.id, loadState, reduced])
 
-  const displayedHtml = showTranslation && translated ? translated.html : html
+  const displayedHtml = useMemo(() => {
+    if (!showTranslation || !translated) return html
+    if (activeDisplayMode === 'compare') {
+      return translated.compareHtml || translated.html
+    }
+    return translated.replaceHtml || translated.html
+  }, [showTranslation, translated, activeDisplayMode, html])
   useEffect(() => {
     if (
       loadState !== 'ready' ||
@@ -652,6 +802,13 @@ export function ReaderScreen({
     return () => clearTimeout(timer)
   }, [article.contentType, article.videoUrl, html, loadState])
   const coverUrl = articleCoverUrl(article.image)
+  // The feed might already include the metadata cover as its first image.
+  // Only suppress that duplicate; non-feed article covers keep their styling.
+  const showStandaloneCover = useMemo(
+    () => Boolean(coverUrl && (!['feed', 'feed-excerpt'].includes(bodySource || '') ||
+      shouldRenderStandaloneCover(article.image, html, article.originUrl))),
+    [coverUrl, bodySource, article.image, article.originUrl, html],
+  )
   const autoLoadMedia = shouldAutoLoadMedia({
     wifiOnlyAutoLoadMedia: Boolean(wifiOnlyAutoLoadMedia),
     isNative: Capacitor.isNativePlatform(),
@@ -693,7 +850,7 @@ export function ReaderScreen({
     setUnlockedMediaUrls((prev) => (prev.includes(url) ? prev : [...prev, url]))
   }, [])
   const comparing = Boolean(
-    showTranslation && translated && translationPrefs.displayMode === 'compare',
+    showTranslation && translated && activeDisplayMode === 'compare',
   )
   /** 分享深链没带标题，靠正文抽取补；抽取失败就换个中性说法，别一直显示占位 */
   const pendingTitle =
@@ -712,6 +869,49 @@ export function ReaderScreen({
     () => withResolvedShareTitle(article, resolvedTitle),
     [article, resolvedTitle],
   )
+
+  const readAloudDocument = useMemo(
+    () =>
+      loadState === 'ready'
+        ? segmentArticle(article.id, displayedTitle, displayedHtml, {
+            sourceName: article.sourceName,
+            artwork: article.image,
+          })
+        : null,
+    [
+      article.id,
+      article.image,
+      article.sourceName,
+      displayedHtml,
+      displayedTitle,
+      loadState,
+    ],
+  )
+  const readAloud = useReadAloud(
+    readAloudDocument,
+    readAloudPrefs,
+    translationPrefs.ai,
+  )
+  const readAloudState = readAloud.snapshot.state
+  const readAloudCurrent = readAloud.isCurrentArticle
+  const readAloudBusy =
+    readAloudCurrent &&
+    (readAloudState === 'loading' || readAloudState === 'playing')
+  const toggleReadAloud = useCallback(() => {
+    if (!readAloudCurrent) {
+      void readAloud.start(true)
+      return
+    }
+    if (readAloudState === 'loading' || readAloudState === 'playing') {
+      void readAloud.pause()
+      return
+    }
+    if (readAloudState === 'paused') {
+      void readAloud.resume()
+      return
+    }
+    void readAloud.start(readAloudState !== 'ended')
+  }, [readAloud, readAloudCurrent, readAloudState])
 
   // 同一份偏好复用一个实例：AI 翻译部分失败后「重试」只补失败段，不重发已成功段
   const translationService = useMemo(
@@ -957,16 +1157,18 @@ export function ReaderScreen({
   const sourceHint = useMemo(() => {
     const origin =
       bodySource === 'feed'
-        ? '来自订阅源全文'
-        : bodySource === 'netease'
-          ? '来自网易正文接口'
-          : bodySource === 'readability'
-            ? '已在应用内抽取原文'
-            : bodySource === 'video'
-              ? '视频报道 · 应用内播放'
-              : bodySource === 'blocked'
-                ? '原站限制 · 仅摘要'
-                : null
+        ? '来自订阅源正文'
+        : bodySource === 'feed-excerpt'
+          ? '来自订阅源 · 完整性未确认'
+          : bodySource === 'netease'
+            ? '来自网易正文接口'
+            : bodySource === 'readability'
+              ? '已在应用内抽取原文'
+              : bodySource === 'video'
+                ? '视频报道 · 应用内播放'
+                : bodySource === 'blocked'
+                  ? '原站正文不可读取 · 仅摘要'
+                  : null
     if (!origin) return null
     return fromCache ? `${origin} · 离线缓存` : origin
   }, [bodySource, fromCache])
@@ -1118,17 +1320,9 @@ export function ReaderScreen({
       return
     }
 
-    // 2. 如果当前正在显示译文，点击直接切回原文；报错状态除外——那时按钮语义是「重试」，落到下方重新翻译
-    if (showTranslation && translationState !== 'error') {
-      setShowTranslation(false)
-      setTranslationError('')
-      return
-    }
-
-    // 3. 如果已有完整译文且空闲，直接切换展示
+    // 2. 如果已有完整译文且空闲，点击切换菜单打开/关闭
     if (translated && translationState === 'idle') {
-      setShowTranslation(true)
-      setTranslationError('')
+      setTranslationMenuOpen((prev) => !prev)
       return
     }
 
@@ -1138,7 +1332,7 @@ export function ReaderScreen({
     setTranslationState('loading')
     setTranslationError('')
     setShowTranslation(true)
-    setTranslated({ title: article.title, html })
+    setTranslated({ title: article.title, html, compareHtml: html, replaceHtml: html })
     let latestPartial: TranslatedArticleContent | null = null
     try {
       const flushPartial = () => {
@@ -1150,7 +1344,7 @@ export function ReaderScreen({
       const result = await translationService.translateArticle(
         article.title,
         html,
-        translationPrefs,
+        { ...translationPrefs, displayMode: 'compare' },
         {
           signal: controller.signal,
           onPartial: (partial) => {
@@ -1242,26 +1436,58 @@ export function ReaderScreen({
             <div className="flex shrink-0 items-center gap-1">
               <button
                 type="button"
-                disabled={loadState !== 'ready' || translationState === 'loading'}
+                disabled={loadState !== 'ready'}
                 onClick={() => void toggleTranslation()}
-                aria-pressed={showTranslation}
-                aria-label={showTranslation ? '显示原文' : '翻译文章'}
-                className="flex h-9 items-center gap-1 px-1 transition-colors duration-200 disabled:opacity-40"
+                aria-expanded={translationMenuOpen}
+                aria-haspopup="dialog"
+                aria-label={
+                  translationState === 'loading'
+                    ? '取消翻译'
+                    : translationState === 'error'
+                      ? '重新翻译'
+                      : translated
+                        ? `译文显示方式（当前：${currentTranslationMode === 'original' ? '原文' : currentTranslationMode === 'compare' ? '双语对照' : '仅显示译文'}）`
+                        : '翻译正文'
+                }
+                className={`flex h-9 items-center gap-1 px-1.5 rounded-lg transition-colors duration-200 disabled:opacity-40 ${
+                  translationMenuOpen ? 'bg-paper/10' : 'hover:bg-paper/5'
+                }`}
               >
                 {translationState === 'loading' ? (
                   <LoaderCircle size={14} strokeWidth={1.7} className="animate-spin text-cinnabar-soft" />
                 ) : (
-                  <Languages size={14} strokeWidth={1.7} className={showTranslation ? 'text-cinnabar' : 'text-paper-muted'} />
+                  <Languages
+                    size={14}
+                    strokeWidth={1.7}
+                    className={showTranslation ? 'text-cinnabar' : 'text-paper-muted'}
+                  />
                 )}
-                <span className={`font-mono text-[10px] tracking-[0.08em] ${showTranslation ? 'text-cinnabar-soft' : 'text-paper-muted'}`}>
+                <span
+                  className={`font-mono text-[10px] tracking-[0.08em] ${
+                    showTranslation ? 'text-cinnabar-soft font-medium' : 'text-paper-muted'
+                  }`}
+                >
                   {translationState === 'loading'
                     ? '翻译中'
                     : translationState === 'error'
                       ? '重试'
-                      : showTranslation
-                        ? '原文'
-                        : '翻译'}
+                      : !translated
+                        ? '翻译'
+                        : currentTranslationMode === 'original'
+                          ? '原文'
+                          : currentTranslationMode === 'compare'
+                            ? '双语'
+                            : '译文'}
                 </span>
+                {translated && (
+                  <ChevronDown
+                    size={11}
+                    strokeWidth={2}
+                    className={`text-paper-faint transition-transform duration-200 ${
+                      translationMenuOpen ? 'rotate-180 text-cinnabar-soft' : ''
+                    }`}
+                  />
+                )}
               </button>
               {canSpeedRead && (
                 <button
@@ -1289,6 +1515,37 @@ export function ReaderScreen({
                   </span>
                 </button>
               )}
+              <button
+                type="button"
+                disabled={loadState !== 'ready' || !readAloudDocument?.segments.length}
+                onClick={toggleReadAloud}
+                aria-label={readAloudBusy ? '暂停朗读' : readAloudCurrent && readAloudState === 'paused' ? '继续朗读' : '朗读文章'}
+                aria-pressed={readAloudBusy}
+                className="flex h-9 items-center gap-1 px-1 transition-colors duration-200 disabled:opacity-35"
+              >
+                {readAloudCurrent && readAloudState === 'loading' ? (
+                  <LoaderCircle size={14} strokeWidth={1.7} className="animate-spin text-cinnabar-soft" />
+                ) : (
+                  <Volume2
+                    size={14}
+                    strokeWidth={1.7}
+                    className={readAloudCurrent && readAloudState !== 'idle' ? 'text-cinnabar' : 'text-paper-muted'}
+                  />
+                )}
+                <span
+                  className={`hidden font-mono text-[10px] tracking-[0.08em] min-[430px]:inline ${
+                    readAloudCurrent && readAloudState !== 'idle' ? 'text-cinnabar-soft' : 'text-paper-muted'
+                  }`}
+                >
+                  {readAloudCurrent && readAloudState === 'loading'
+                    ? '准备中'
+                    : readAloudBusy
+                      ? '暂停'
+                      : readAloudCurrent && readAloudState === 'paused'
+                        ? '继续'
+                        : '朗读'}
+                </span>
+              </button>
               <button
                 type="button"
                 onClick={() => onToggleLater(laterArticle)}
@@ -1334,6 +1591,19 @@ export function ReaderScreen({
             </div>
           </div>
         </header>
+
+        <ReadAloudBar
+          snapshot={readAloud.snapshot}
+          activeForArticle={
+            readAloudCurrent && readAloud.snapshot.state !== 'idle'
+          }
+          onStart={() => void readAloud.start(false)}
+          onPause={() => void readAloud.pause()}
+          onResume={() => void readAloud.resume()}
+          onPrevious={() => void readAloud.previous()}
+          onNext={() => void readAloud.next()}
+          onStop={() => void readAloud.stop()}
+        />
 
         <div className="relative min-h-0 flex-1">
           <div
@@ -1381,7 +1651,7 @@ export function ReaderScreen({
                   className="mt-3.5 rounded-2xl border border-haze bg-ink-raised/80 p-3.5 text-[12.5px] leading-relaxed text-paper-muted"
                 >
                   <p className="text-paper">
-                    原站有付费墙或反爬限制，站内只能展示摘要。完整正文请在浏览器打开核对。
+                    原站正文暂不可读取，目前仅有订阅源摘要，可在浏览器核对原文。
                   </p>
                   <div className="mt-2.5 flex flex-wrap gap-2">
                     {(resolvedOriginUrl || article.originUrl) && (
@@ -1467,7 +1737,7 @@ export function ReaderScreen({
               )}
             </div>
 
-            {coverUrl && article.contentType !== 'video' && (
+            {showStandaloneCover && coverUrl && article.contentType !== 'video' && (
               <div className="mt-5 page-x lg:px-8">
                 <InkImage
                   src={coverUrl}
@@ -1476,16 +1746,16 @@ export function ReaderScreen({
                   collapseOnError
                   className="h-[220px] w-full sm:h-[300px] md:h-[380px] lg:h-[420px] rounded-xl overflow-hidden"
                   onOpen={
-                    einkMode ? undefined : (src) => setLightbox({ src, alt: article.title })
+                    einkMode ? undefined : (src) => setLightbox(collectImageGallery(proseRef.current, { src, alt: article.title }))
                   }
                 />
               </div>
             )}
 
-            {useOriginSurface && (resolvedOriginUrl || article.originUrl) && (
+            {useOriginSurface && (feedEmbeddedPlayerUrl || resolvedOriginUrl || article.originUrl) && (
               <OriginPlayerSurface
-                pageUrl={resolvedOriginUrl || article.originUrl!}
-                referrer={resolvedOriginUrl || article.originUrl}
+                pageUrl={feedEmbeddedPlayerUrl || resolvedOriginUrl || article.originUrl!}
+                referrer={resolvedOriginUrl || article.originUrl || feedEmbeddedPlayerUrl}
                 title={article.title}
                 poster={article.image}
                 openOriginal={() => void openOriginal()}
@@ -1691,10 +1961,31 @@ export function ReaderScreen({
           saved={saved}
           translating={translationState === 'loading'}
           showTranslation={showTranslation}
+          translationMode={currentTranslationMode}
           onClose={() => setEinkMenuOpen(false)}
           onFontScale={(next) => onTypographyChange?.({ fontScale: next })}
           onJumpPage={(index) => paged.setPageIndex(index)}
-          onToggleTranslation={() => void toggleTranslation()}
+          onToggleTranslation={() => {
+            if (translationState === 'loading') {
+              cancelTranslation()
+              setTranslated(null)
+              setTranslationState('idle')
+              setTranslationError('')
+              setShowTranslation(false)
+              return
+            }
+            if (!translated) {
+              void toggleTranslation()
+              return
+            }
+            if (currentTranslationMode === 'compare') {
+              handleSelectTranslationMode('replace')
+            } else if (currentTranslationMode === 'replace') {
+              handleSelectTranslationMode('original')
+            } else {
+              handleSelectTranslationMode('compare')
+            }
+          }}
           onToggleLater={() => onToggleLater(laterArticle)}
           onShare={openShareSheet}
           onBackToList={onClose}
@@ -1721,6 +2012,25 @@ export function ReaderScreen({
         onReextract={() => {
           setMoreMenuOpen(false)
           setRetryToken((token) => token + 1)
+        }}
+      />
+
+      <ReaderTranslationMenu
+        open={translationMenuOpen}
+        onClose={() => setTranslationMenuOpen(false)}
+        currentMode={currentTranslationMode}
+        onSelectMode={handleSelectTranslationMode}
+        translationPrefs={translationPrefs}
+        resolvedSourceLanguage={translated?.resolvedSourceLanguage}
+        hasError={translationState === 'error'}
+        errorMessage={translationError}
+        onRetry={() => {
+          setTranslationMenuOpen(false)
+          void toggleTranslation()
+        }}
+        onOpenSettings={() => {
+          setTranslationMenuOpen(false)
+          onOpenTranslationSettings?.()
         }}
       />
 
@@ -1777,6 +2087,23 @@ export function ReaderScreen({
         </div>
       )}
 
+      {/* 正文内悬浮翻译模式切换胶囊（大拇指触手可及，0ms 瞬间切换） */}
+      {translated && !einkMode && !translationBarDismissed && (
+        <ReaderTranslationBar
+          visible={
+            pillVisible &&
+            !translationMenuOpen &&
+            !commentsOpen &&
+            !shareSheetOpen &&
+            !speedReadOpen &&
+            !lightbox
+          }
+          currentMode={currentTranslationMode}
+          onSelectMode={handleSelectTranslationMode}
+          onDismiss={() => setTranslationBarDismissed(true)}
+        />
+      )}
+
       {/* 底部右下角悬浮跟贴胶囊（随时一触即达） */}
       {canComment && !commentsOpen && !shareSheetOpen && !einkMode && !speedReadOpen && (
         <div
@@ -1810,8 +2137,13 @@ export function ReaderScreen({
 
       {lightbox && (
         <ImageLightbox
-          src={lightbox.src}
-          alt={lightbox.alt}
+          {...lightbox.items[lightbox.index]}
+          items={lightbox.items}
+          index={lightbox.index}
+          total={lightbox.items.length}
+          onSelect={(index) => setLightbox((state) => state ? { ...state, index } : state)}
+          onPrevious={lightbox.index > 0 ? () => setLightbox((state) => state ? { ...state, index: state.index - 1 } : state) : undefined}
+          onNext={lightbox.index < lightbox.items.length - 1 ? () => setLightbox((state) => state ? { ...state, index: state.index + 1 } : state) : undefined}
           onClose={() => setLightbox(null)}
           overlayCloserRef={overlayCloserRef}
         />

@@ -1,16 +1,17 @@
 import { useState } from 'react'
 import {
-  BookMarked,
+  Bot,
   BookOpen,
   Check,
   ChevronRight,
   CopyPlus,
   Cpu,
+  FlaskConical,
   FolderPlus,
   Gamepad2,
   Globe,
   Layers,
-  LayoutGrid,
+  Newspaper,
   Pencil,
   Plus,
   RotateCcw,
@@ -23,11 +24,12 @@ import { ConfirmDialog, PromptDialog } from '../../components/ConfirmDialog'
 import { SettingsHint, SettingsSection, SettingsShell } from '../../components/SettingsShell'
 import { CATEGORIES, type NewsCategory } from '../../sources/categories'
 import {
+  BUILTIN_AI_ID,
   BUILTIN_BIZ_ID,
   BUILTIN_DEFAULT_ID,
   BUILTIN_DEPTH_ID,
-  BUILTIN_FUN_ID,
-  BUILTIN_MINDFUL_ID,
+  BUILTIN_LIFE_ID,
+  BUILTIN_SCIENCE_ID,
   BUILTIN_TECH_ID,
   BUILTIN_WORLD_ID,
   findBuiltinPreset,
@@ -99,10 +101,19 @@ function getPresetSummary(snapshot: LayoutSnapshot) {
     .map((id) => customMap.get(id) ?? builtinMap.get(id))
     .filter((c): c is NewsCategory => Boolean(c))
 
+  const visibleSourceIds = new Set<string>()
+  for (const category of visibleCategories) {
+    const ids =
+      category.id === 'mix'
+        ? (snapshot.enabledSourceIds ?? [])
+        : (snapshot.categorySources?.[category.id] ?? category.sourceIds ?? [])
+    ids.forEach((id) => visibleSourceIds.add(id))
+  }
+
   return {
     visibleCategories,
     visibleCount: visibleCategories.length,
-    enabledSourcesCount: snapshot.enabledSourceIds?.length ?? 0,
+    enabledSourcesCount: visibleSourceIds.size,
     customCount: snapshot.customCategories?.length ?? 0,
   }
 }
@@ -111,18 +122,20 @@ function getPresetSummary(snapshot: LayoutSnapshot) {
 function getBuiltinIcon(id: string) {
   switch (id) {
     case BUILTIN_DEFAULT_ID:
-      return LayoutGrid
-    case BUILTIN_TECH_ID:
-      return Cpu
-    case BUILTIN_DEPTH_ID:
-      return BookMarked
-    case BUILTIN_BIZ_ID:
-      return TrendingUp
+      return Newspaper
     case BUILTIN_WORLD_ID:
       return Globe
-    case BUILTIN_MINDFUL_ID:
+    case BUILTIN_BIZ_ID:
+      return TrendingUp
+    case BUILTIN_TECH_ID:
+      return Cpu
+    case BUILTIN_AI_ID:
+      return Bot
+    case BUILTIN_SCIENCE_ID:
+      return FlaskConical
+    case BUILTIN_DEPTH_ID:
       return BookOpen
-    case BUILTIN_FUN_ID:
+    case BUILTIN_LIFE_ID:
       return Gamepad2
     default:
       return Layers
@@ -645,7 +658,7 @@ export function PresetListScreen({
       <SettingsHint>切换会整包替换；改分类写回当前预设，内置可恢复出厂。</SettingsHint>
 
       {/* 内置场景包 */}
-      <SettingsSection title="内置场景包">
+      <SettingsSection variant="plain" title="内置场景包">
         <ul className="page-x grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {builtins.map((preset) => {
             const isCurrent = preset.id === state.activePresetId
@@ -677,7 +690,7 @@ export function PresetListScreen({
       </SettingsSection>
 
       {/* 我的自定义预设 */}
-      <SettingsSection title="我的预设">
+      <SettingsSection variant="plain" title="我的预设">
         {state.userPresets.length === 0 ? (
           <PresetEmptyState
             onSaveAs={() => setDialog({ type: 'saveAs' })}

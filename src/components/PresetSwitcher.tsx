@@ -1,6 +1,47 @@
 import { memo, useEffect, useId, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { Check, ChevronDown, Globe, LayoutTemplate, Settings2 } from 'lucide-react'
+import { Capacitor } from '@capacitor/core'
+import {
+  ArrowDown,
+  ArrowUp,
+  BarChart3,
+  BookOpen,
+  Bot,
+  Check,
+  ChevronDown,
+  CircleAlert,
+  Cpu,
+  FlaskConical,
+  Globe,
+  Layers3,
+  Grid2X2,
+  LayoutTemplate,
+  Newspaper,
+  PencilLine,
+  Plus,
+  Search,
+  Settings,
+  Settings2,
+  Trophy,
+  UserRound,
+  UsersRound,
+  X,
+} from 'lucide-react'
+
+import { useHardwareBackLayer } from '../hooks/useHardwareBackLayer'
+import { useLongPressAction } from '../hooks/useLongPressAction'
+import type { Point } from '../lib/contextActions'
+import {
+  BROWSER_ENGINES,
+  BROWSER_KEYS,
+  readBrowserPreference,
+  resolveBrowserAddress,
+  type BrowserSearchChoice,
+} from '../features/browser/browserPreferences'
+import { PromptDialog } from './ConfirmDialog'
+import { ContextActionMenu, type ContextActionItem } from './ContextActionMenu'
+import { CmsHelpDialog } from './CmsHelpDialog'
+import { CmsGridCard } from './CmsGridCard'
 
 export interface PresetSwitcherItem {
   id: string
@@ -23,15 +64,34 @@ export interface PresetSwitcherProps {
   items: PresetSwitcherItem[]
   onSelect: (id: string) => void
   onManage: () => void
+  onRenamePreset?: (id: string, name: string) => void
+  onMovePreset?: (id: string, direction: -1 | 1) => void
+  onOpenSettings?: () => void
+  onOpenBrowser?: (url?: string) => void
   /** 独立站点工作区；与 preset 完全分离，选择时不得调用 onSelect。 */
   siteItems?: SiteSwitcherItem[]
   onSelectSite?: (id: string) => void
-  /** 有已适配站点时传入，点击后进入站点浏览 */
+  /** 在 CMS 标签中浏览所有已适配站点（不改变新闻预设）。 */
   onSites?: () => void
-  /** 已适配站点数量 */
-  siteCount?: number
+  /** 进入自定义源管理以添加受支持的 CMS 站点 */
+  onAddCms?: () => void
+  cmsSites?: {
+    id: string
+    name: string
+    description?: string
+    framework?: string
+    url?: string
+  }[]
+  onSelectCms?: (id: string) => void
+  onRenameCms?: (id: string, name: string) => void
+  onMoveCms?: (id: string, direction: -1 | 1) => void
+  /** CMS 站点页为独立阅读空间，打开切换器时优先定位到该类型。 */
+  cmsActive?: boolean
+  activeCmsId?: string | null
   variant?: 'pill' | 'card' | 'tabbar' | 'sidebar'
 }
+
+type ManagedItem = { kind: 'preset' | 'cms'; id: string }
 
 /**
  * 场景预设快捷切换：
@@ -46,28 +106,113 @@ export function PresetSwitcher({
   items,
   onSelect,
   onManage,
+  onRenamePreset,
+  onMovePreset,
+  onOpenSettings,
+  onOpenBrowser,
   siteItems = [],
   onSelectSite,
   onSites,
-  siteCount = 0,
+  onAddCms,
+  cmsSites = [],
+  onSelectCms,
+  onRenameCms,
+  onMoveCms,
+  cmsActive = false,
+  activeCmsId = null,
   variant = 'pill',
 }: PresetSwitcherProps) {
   const [open, setOpen] = useState(false)
+  const [helpOpen, setHelpOpen] = useState(false)
+  const [presetTab, setPresetTab] = useState<'builtin' | 'custom' | 'cms'>('builtin')
+  const [actionMenu, setActionMenu] = useState<(ManagedItem & { anchor: Point }) | null>(null)
+  const [renameTarget, setRenameTarget] = useState<ManagedItem | null>(null)
+  const [browserQuery, setBrowserQuery] = useState('')
   const titleId = useId()
+  // The embedded WebView has an Android implementation only. User agent
+  // detection would incorrectly expose it in Android's ordinary web browsers.
+  const canOpenBrowser = Capacitor.getPlatform() === 'android'
+
+  useEffect(() => {
+    if (!open) {
+      setBrowserQuery('')
+    }
+  }, [open])
+
+  const handleOpenBrowserWithQuery = (queryText?: string) => {
+    if (!canOpenBrowser || !onOpenBrowser) return
+    const trimmed = (queryText !== undefined ? queryText : browserQuery).trim()
+    setOpen(false)
+    setBrowserQuery('')
+    if (!trimmed) {
+      onOpenBrowser()
+      return
+    }
+    const saved = readBrowserPreference(BROWSER_KEYS.search)
+    const engine = saved && Object.prototype.hasOwnProperty.call(BROWSER_ENGINES, saved)
+      ? (saved as BrowserSearchChoice)
+      : 'bing'
+    const resolved = resolveBrowserAddress(trimmed, engine) || (BROWSER_ENGINES[engine].url + encodeURIComponent(trimmed))
+    onOpenBrowser(resolved)
+  }
+
+  const builtins = useMemo(() => items.filter((item) => item.builtin), [items])
+  const mine = useMemo(() => items.filter((item) => !item.builtin), [items])
+  const showSiteSection = siteItems.length > 0
+  const actionList = actionMenu?.kind === 'cms' ? cmsSites : mine
+  const actionIndex = actionList.findIndex((item) => item.id === actionMenu?.id)
+  const actionItem = actionList[actionIndex]
+  const renameItem = (renameTarget?.kind === 'cms' ? cmsSites : mine)
+    .find((item) => item.id === renameTarget?.id)
+  const onRename = renameTarget?.kind === 'cms' ? onRenameCms : onRenamePreset
+  const onMove = actionMenu?.kind === 'cms' ? onMoveCms : onMovePreset
+  const canRename = actionMenu?.kind === 'cms' ? Boolean(onRenameCms) : Boolean(onRenamePreset)
+  const actionItems: ContextActionItem[] = actionItem && actionMenu ? [
+    ...(canRename ? [{
+      id: 'rename',
+      label: actionMenu.kind === 'cms' ? '重命名站点' : '重命名预设',
+      icon: PencilLine,
+      onSelect: () => setRenameTarget({ kind: actionMenu.kind, id: actionItem.id }),
+    }] : []),
+    ...(onMove && actionIndex > 0 ? [{
+      id: 'move-before', label: '向前移动', icon: ArrowUp,
+      onSelect: () => onMove(actionItem.id, -1),
+    }] : []),
+    ...(onMove && actionIndex < actionList.length - 1 ? [{
+      id: 'move-after', label: '向后移动', icon: ArrowDown,
+      onSelect: () => onMove(actionItem.id, 1),
+    }] : []),
+  ] : []
+  const menuOpen = Boolean(open && actionMenu && actionItem && actionItems.length)
+  const renameOpen = Boolean(open && renameItem && onRename)
+
+  useHardwareBackLayer(open && !menuOpen && !renameOpen, () => {
+    setOpen(false)
+    return true
+  })
 
   useEffect(() => {
     if (!open) return
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false)
+      if (event.key !== 'Escape') return
+      if (renameOpen) setRenameTarget(null)
+      else if (!menuOpen) setOpen(false)
     }
     window.addEventListener('keydown', onKey)
-    return () => {
-      window.removeEventListener('keydown', onKey)
-    }
-  }, [open])
+    return () => window.removeEventListener('keydown', onKey)
+  }, [open, menuOpen, renameOpen])
 
-  const builtins = useMemo(() => items.filter((item) => item.builtin), [items])
-  const mine = useMemo(() => items.filter((item) => !item.builtin), [items])
+  useEffect(() => {
+    if (actionMenu && !actionItem) setActionMenu(null)
+    if (renameTarget && !renameItem) setRenameTarget(null)
+  }, [actionMenu, actionItem, renameTarget, renameItem])
+
+  const openSwitcher = () => {
+    setActionMenu(null)
+    setRenameTarget(null)
+    setPresetTab(cmsActive ? 'cms' : mine.some((item) => item.active) ? 'custom' : 'builtin')
+    setOpen(true)
+  }
 
   // 不用 backdrop-blur：全屏毛玻璃在 Android WebView 上会强制栅格化整页信息流，
   // 打开时常卡数百毫秒～1s+。半透明遮罩 + 轻位移入场即可，兼容 Chrome 69。
@@ -89,7 +234,7 @@ export function PresetSwitcher({
           role="dialog"
           aria-modal="true"
           aria-labelledby={titleId}
-          className="preset-switcher-sheet relative z-10 flex max-h-[min(82vh,580px)] w-full max-w-lg flex-col overflow-hidden rounded-t-3xl md:rounded-2xl border border-haze/90 bg-ink-raised shadow-lg"
+          className="preset-switcher-sheet relative z-10 flex max-h-[min(88vh,680px)] w-full max-w-lg flex-col overflow-hidden rounded-t-3xl md:rounded-2xl border border-haze/90 bg-ink-raised shadow-lg"
           style={{
             paddingBottom: 'calc(var(--sab, 0px) + 14px)',
           }}
@@ -99,7 +244,7 @@ export function PresetSwitcher({
           </div>
 
           <div className="page-x flex shrink-0 items-center justify-between gap-3 pt-3 pb-3 border-b border-haze/50">
-            <div className="flex items-center gap-2.5 min-w-0">
+            <div className="flex min-w-0 items-center gap-2.5">
               <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-cinnabar/15 text-cinnabar">
                 <LayoutTemplate size={16} />
               </div>
@@ -107,35 +252,244 @@ export function PresetSwitcher({
                 <h2 id={titleId} className="font-display text-[18px] font-semibold leading-none text-paper">
                   切换布局
                 </h2>
-                <p className="mt-1 font-mono text-[10.5px] tracking-wide text-paper-faint truncate">
-                  当前布局：<span className="text-cinnabar font-medium">{activeName}</span>
+                <p className="mt-1 truncate text-[11px] text-paper-faint">
+                  当前：<span className="font-medium text-cinnabar">{activeName}</span>
                 </p>
               </div>
             </div>
-            <button
-              type="button"
-              onClick={() => {
-                setOpen(false)
-                onManage()
-              }}
-              className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-haze/90 bg-ink px-3 py-1.5 font-mono text-[11px] font-medium text-paper-muted hover:border-cinnabar/60 hover:text-cinnabar transition-colors"
-            >
-              <Settings2 size={13} strokeWidth={1.7} />
-              管理预设
-            </button>
+            <div className="flex shrink-0 items-center gap-1.5">
+              {presetTab === 'cms' && (
+                <button
+                  type="button"
+                  aria-label="查看 CMS 站点说明"
+                  title="CMS 站点使用说明与支持类型"
+                  onClick={() => setHelpOpen(true)}
+                  className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border border-haze/90 bg-ink text-paper-muted transition-colors hover:border-cinnabar/60 hover:text-cinnabar"
+                >
+                  <CircleAlert size={15} strokeWidth={1.8} className="text-cinnabar" />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setOpen(false)
+                  onManage()
+                }}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-haze/90 bg-ink px-3 py-1.5 font-mono text-[11px] font-medium text-paper-muted transition-colors hover:border-cinnabar/60 hover:text-cinnabar"
+              >
+                <Settings2 size={13} strokeWidth={1.7} />
+                管理预设
+              </button>
+              {onOpenSettings ? (
+                <button
+                  type="button"
+                  aria-label="设置"
+                  title="设置"
+                  onClick={() => {
+                    setOpen(false)
+                    onOpenSettings()
+                  }}
+                  className="inline-flex size-8 shrink-0 items-center justify-center rounded-full border border-haze/90 bg-ink text-paper-muted transition-colors hover:border-cinnabar/60 hover:text-cinnabar"
+                >
+                  <Settings size={16} strokeWidth={1.7} />
+                </button>
+              ) : null}
+            </div>
           </div>
 
-          <div className="scroll-hidden min-h-0 flex-1 overflow-y-auto overscroll-contain px-3.5 py-2.5 sm:px-5 sm:py-3 space-y-3">
-            {builtins.length > 0 && (
-              <section>
-                <div className="mb-2 flex items-center gap-2">
-                  <span className="font-mono text-[10px] tracking-[0.2em] uppercase text-paper-faint">
-                    内置精选场景
-                  </span>
-                  <span className="h-px flex-1 bg-haze/60" />
+            {canOpenBrowser && onOpenBrowser ? (
+              <div className="px-3.5 pt-3 sm:px-5">
+                <div className="flex w-full items-center gap-2 rounded-xl border border-haze/80 bg-ink p-1.5 transition-colors focus-within:border-cinnabar/40 focus-within:bg-ink-raised hover:border-cinnabar/30">
+                  <button
+                    type="button"
+                    aria-label="进入网页浏览器"
+                    title="进入网页浏览器"
+                    onClick={() => {
+                      setOpen(false)
+                      setBrowserQuery('')
+                      onOpenBrowser()
+                    }}
+                    className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-cinnabar/10 text-cinnabar transition-all hover:bg-cinnabar/20 active:scale-95"
+                  >
+                    <Globe size={20} strokeWidth={1.6} />
+                  </button>
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault()
+                      handleOpenBrowserWithQuery()
+                    }}
+                    className="flex min-w-0 flex-1 items-center gap-1.5 pr-1"
+                  >
+                    <input
+                      type="text"
+                      value={browserQuery}
+                      onChange={(e) => setBrowserQuery(e.target.value)}
+                      placeholder="搜索或输入网址..."
+                      enterKeyHint="search"
+                      aria-label="搜索或输入网址"
+                      className="min-w-0 flex-1 bg-transparent px-1.5 py-1 text-[13px] text-paper placeholder:text-paper-faint outline-none"
+                    />
+                    {browserQuery ? (
+                      <button
+                        type="button"
+                        aria-label="清空输入"
+                        onClick={() => setBrowserQuery('')}
+                        className="flex size-6 shrink-0 items-center justify-center rounded-full text-paper-faint hover:text-paper-muted"
+                      >
+                        <X size={13} />
+                      </button>
+                    ) : null}
+                    <button
+                      type="submit"
+                      aria-label="进入浏览器搜索"
+                      title="进入浏览器搜索"
+                      onClick={() => handleOpenBrowserWithQuery()}
+                      className="flex size-8 shrink-0 items-center justify-center rounded-lg text-paper-faint transition-colors hover:bg-haze hover:text-cinnabar active:scale-95"
+                    >
+                      <Search size={15} strokeWidth={1.8} />
+                    </button>
+                  </form>
                 </div>
+              </div>
+            ) : null}
+            <div className="flex min-h-0 flex-1 flex-col">
+            {/* 上半区：布局预设。内置与自定义只在这里切换，社区不参与 preset 状态。 */}
+            <div className="shrink-0 px-3.5 pt-2.5 sm:px-5">
+              <div
+                role="tablist"
+                aria-label="布局类型"
+                className="grid grid-cols-3 rounded-xl border border-haze/80 bg-ink p-1"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={presetTab === 'builtin'}
+                  onClick={() => setPresetTab('builtin')}
+                  className={`flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[12px] font-medium transition-all ${
+                    presetTab === 'builtin'
+                      ? 'bg-ink-raised text-paper shadow-xs'
+                      : 'text-paper-faint hover:text-paper-muted'
+                  }`}
+                >
+                  <Grid2X2 size={14} strokeWidth={1.8} />
+                  内置预设
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={presetTab === 'custom'}
+                  onClick={() => setPresetTab('custom')}
+                  className={`flex items-center justify-center gap-1.5 rounded-lg px-3 py-2 text-[12px] font-medium transition-all ${
+                    presetTab === 'custom'
+                      ? 'bg-cinnabar text-white shadow-xs'
+                      : 'text-paper-faint hover:text-paper-muted'
+                  }`}
+                >
+                  <UserRound size={14} strokeWidth={1.8} />
+                  自定义
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={presetTab === 'cms'}
+                  onClick={() => setPresetTab('cms')}
+                  className={`flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-[12px] font-medium transition-all ${presetTab === 'cms' ? 'bg-ink-raised text-paper shadow-xs' : 'text-paper-faint hover:text-paper-muted'}`}
+                >
+                  <Layers3 size={14} strokeWidth={1.8} />
+                  CMS 站点
+                </button>
+              </div>
+            </div>
+
+            <div className="scroll-hidden min-h-0 flex-1 overflow-y-auto overscroll-contain px-3.5 py-2.5 sm:px-5 sm:py-3">
+              {presetTab === 'builtin' ? (
+                builtins.length > 0 ? (
+                  <ul className="grid grid-cols-2 gap-1.5 sm:gap-2">
+                    {builtins.map((item) => (
+                      <PresetGridCard
+                        key={item.id}
+                        item={item}
+                        onPick={() => {
+                          if (!item.active) onSelect(item.id)
+                          setOpen(false)
+                        }}
+                      />
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="rounded-xl border border-haze/80 bg-ink/45 px-4 py-6 text-center text-[12px] text-paper-faint">
+                    暂无可用内置预设
+                  </div>
+                )
+              ) : presetTab === 'cms' ? (
+                cmsSites.length > 0 && onSelectCms ? (
+                  <div className="space-y-2.5">
+                    <ul className="grid grid-cols-2 gap-1.5 sm:gap-2">
+                      {cmsSites.map((site) => (
+                        <CmsGridCard
+                          key={site.id}
+                          site={site}
+                          active={Boolean(cmsActive && activeCmsId === site.id)}
+                          onPick={() => {
+                            setOpen(false)
+                            onSelectCms(site.id)
+                          }}
+                          onManage={onRenameCms || onMoveCms ? (anchor) => {
+                            setActionMenu({ kind: 'cms', id: site.id, anchor })
+                          } : undefined}
+                        />
+                      ))}
+                    </ul>
+                      <div className="flex items-center gap-2 pt-0.5">
+                        {onSites && cmsSites.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setOpen(false)
+                              onSites()
+                            }}
+                            className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl border border-haze/90 bg-ink/30 px-3 py-2 text-[11.5px] font-medium text-paper-muted transition-colors hover:border-cinnabar/50 hover:text-paper active:scale-[0.99]"
+                          >
+                            <Layers3 size={13} strokeWidth={1.8} />
+                            全部站点
+                          </button>
+                        )}
+                        {onAddCms && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setOpen(false)
+                              onAddCms()
+                            }}
+                            className="flex-1 inline-flex items-center justify-center gap-1.5 rounded-xl border border-dashed border-haze/90 bg-ink/30 px-3 py-2 text-[11.5px] font-medium text-paper-muted transition-colors hover:border-cinnabar/50 hover:text-paper active:scale-[0.99]"
+                          >
+                            <Plus size={13} strokeWidth={2} />
+                            添加更多 CMS 站点
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setHelpOpen(true)}
+                          aria-label="查看 CMS 站点说明"
+                          title="CMS 站点用途与支持类型"
+                          className="inline-flex size-8 shrink-0 items-center justify-center rounded-xl border border-haze/90 bg-ink/30 text-paper-muted transition-colors hover:border-cinnabar/50 hover:text-cinnabar active:scale-95"
+                        >
+                          <CircleAlert size={14} strokeWidth={1.8} />
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <CmsPresetEmptyState
+                      onAdd={() => {
+                        setOpen(false)
+                        onAddCms?.()
+                      }}
+                      onOpenHelp={() => setHelpOpen(true)}
+                    />
+                  )
+              ) : mine.length > 0 ? (
                 <ul className="grid grid-cols-2 gap-1.5 sm:gap-2">
-                  {builtins.map((item) => (
+                  {mine.map((item) => (
                     <PresetGridCard
                       key={item.id}
                       item={item}
@@ -143,117 +497,100 @@ export function PresetSwitcher({
                         if (!item.active) onSelect(item.id)
                         setOpen(false)
                       }}
+                      onManage={onRenamePreset || onMovePreset ? (anchor) => {
+                        setActionMenu({ kind: 'preset', id: item.id, anchor })
+                      } : undefined}
                     />
                   ))}
                 </ul>
-              </section>
-            )}
+              ) : (
+                <CustomPresetEmptyState
+                  onCreate={() => {
+                    setOpen(false)
+                    onManage()
+                  }}
+                />
+              )}
+            </div>
 
-            {mine.length > 0 && (
-              <section>
-                <div className="mb-2 flex items-center gap-2">
-                  <span className="font-mono text-[10px] tracking-[0.2em] uppercase text-paper-faint">
-                    我的自定义预设
+            {/* 下半区：独立社区入口。Web 无可用站点时整段隐藏，避免展示不可用入口。 */}
+            {showSiteSection && <section className="shrink-0 border-t border-haze/65 bg-ink/35 px-3.5 pt-2.5 sm:px-5">
+              <div className="mb-2 flex items-center justify-between gap-3">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-cinnabar/12 text-cinnabar">
+                    <UsersRound size={14} strokeWidth={1.8} />
                   </span>
-                  <span className="h-px flex-1 bg-haze/60" />
-                </div>
-                <ul className="space-y-2">
-                  {mine.map((item) => (
-                    <PresetPickRow
-                      key={item.id}
-                      item={item}
-                      onPick={() => {
-                        if (!item.active) onSelect(item.id)
-                        setOpen(false)
-                      }}
-                    />
-                  ))}
-                </ul>
-              </section>
-            )}
-
-            {(siteItems.length > 0 || (onSites && siteCount > 0)) && (
-              <section>
-                <div className="mb-2 flex items-center gap-2">
-                  <span className="font-mono text-[10px] tracking-[0.2em] uppercase text-paper-faint">
-                    第三方站点
+                  <span className="min-w-0">
+                    <span className="block font-display text-[13px] font-semibold leading-none text-paper">社区入口</span>
+                    <span className="mt-1 block truncate text-[10px] text-paper-faint">进入独立社区工作区</span>
                   </span>
-                  <span className="h-px flex-1 bg-haze/60" />
                 </div>
-                <div className="space-y-2">
-                  {siteItems.map((item) => (
-                    <button
-                      key={item.id}
-                      type="button"
-                      onClick={() => {
-                        if (!item.active) onSelectSite?.(item.id)
-                        setOpen(false)
-                      }}
-                      className={`group flex w-full items-center gap-3.5 rounded-xl border p-3 text-left transition-colors ${
-                        item.active
-                          ? 'border-cinnabar/60 bg-cinnabar/12'
-                          : 'border-haze/80 bg-ink/50 hover:border-cinnabar/40 hover:bg-ink-raised'
-                      }`}
-                    >
-                      <div
-                        className={`flex size-8 shrink-0 items-center justify-center rounded-lg transition-colors ${
-                          item.active
-                            ? 'bg-cinnabar text-white'
-                            : 'bg-ink-raised border border-haze text-paper-muted group-hover:border-cinnabar/40 group-hover:text-cinnabar'
-                        }`}
-                      >
-                        {item.active ? <Check size={16} strokeWidth={2.2} /> : <Globe size={15} strokeWidth={1.6} />}
-                      </div>
-                      <span className="min-w-0 flex-1">
-                        <span className={`truncate font-display text-[15px] font-semibold ${item.active ? 'text-cinnabar' : 'text-paper'}`}>
-                          {item.name}
-                        </span>
-                        {item.description && (
-                          <span className="mt-0.5 block truncate text-[12px] text-paper-faint">
-                            {item.description}
-                          </span>
-                        )}
-                      </span>
-                      <span className="shrink-0 rounded-full border border-haze/80 bg-ink px-2.5 py-1 font-mono text-[10.5px] font-medium text-paper-faint">
-                        {item.active ? '当前' : '进入'}
-                      </span>
-                    </button>
-                  ))}
 
-                  {onSites && siteCount > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setOpen(false)
-                        onSites()
-                      }}
-                      className="group flex w-full items-center gap-3.5 rounded-xl border border-haze/80 bg-ink/50 p-3 text-left transition-colors hover:border-cinnabar/40 hover:bg-ink-raised"
-                    >
-                      <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-ink-raised border border-haze text-paper-muted group-hover:border-cinnabar/40 group-hover:text-cinnabar transition-colors">
-                        <Globe size={15} strokeWidth={1.6} />
-                      </div>
-                      <span className="min-w-0 flex-1">
-                        <span className="truncate font-display text-[15px] font-semibold text-paper">其他已适配站点</span>
-                        <span className="mt-0.5 block text-[12px] text-paper-faint">{siteCount} 个 CMS 站点可浏览</span>
-                      </span>
-                      <span className="shrink-0 rounded-full border border-haze/80 bg-ink px-2.5 py-1 font-mono text-[10.5px] font-medium text-paper-faint">浏览</span>
-                    </button>
-                  )}
-                </div>
-              </section>
-            )}
+              </div>
+
+              <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
+                {siteItems.map((item) => (
+                  <CommunityEntryCard
+                    key={item.id}
+                    item={item}
+                    onPick={() => {
+                      if (!item.active) onSelectSite?.(item.id)
+                      setOpen(false)
+                    }}
+                  />
+                ))}
+              </div>
+            </section>}
           </div>
         </div>
       </div>,
       document.body,
     )
 
+  const overlays = (
+    <>
+      <ContextActionMenu
+        open={menuOpen}
+        anchor={actionMenu?.anchor ?? { x: 0, y: 0 }}
+        title={actionItem?.name ?? ''}
+        caption={actionMenu?.kind === 'cms' ? 'CMS 站点管理' : '自定义预设管理'}
+        actions={actionItems}
+        onClose={() => setActionMenu(null)}
+      />
+      <PromptDialog
+        open={renameOpen}
+        title={renameTarget?.kind === 'cms' ? '重命名站点' : '重命名预设'}
+        label={renameTarget?.kind === 'cms' ? '站点名称' : '预设名称'}
+        defaultValue={renameItem?.name ?? ''}
+        zIndex={90}
+        onCancel={() => setRenameTarget(null)}
+        onConfirm={(name) => {
+          if (!renameItem || !onRename) return
+          onRename(renameItem.id, name)
+          setRenameTarget(null)
+        }}
+      />
+      <CmsHelpDialog
+        open={helpOpen}
+        onClose={() => setHelpOpen(false)}
+        onAddCms={
+          onAddCms
+            ? () => {
+                setOpen(false)
+                onAddCms()
+              }
+            : undefined
+        }
+      />
+    </>
+  )
+
   if (variant === 'tabbar') {
     return (
       <>
         <button
           type="button"
-          onClick={() => setOpen(true)}
+          onClick={openSwitcher}
           aria-haspopup="dialog"
           aria-expanded={open}
           aria-label={`布局，当前：${activeName}，点击切换`}
@@ -274,6 +611,7 @@ export function PresetSwitcher({
           </span>
         </button>
         {sheet}
+        {overlays}
       </>
     )
   }
@@ -283,11 +621,12 @@ export function PresetSwitcher({
       <>
         <button
           type="button"
-          onClick={() => setOpen(true)}
+          onClick={openSwitcher}
           aria-haspopup="dialog"
           aria-expanded={open}
           aria-label={`布局，当前：${activeName}，点击切换`}
           title={`当前布局：${activeName}`}
+          data-tour="desktop-preset-switcher"
           className="group flex w-full items-center justify-between rounded-xl px-3 py-2 text-left text-paper-muted transition-all duration-200 hover:bg-ink-raised/50 hover:text-paper"
         >
           <span className="flex min-w-0 items-center gap-2.5">
@@ -303,6 +642,7 @@ export function PresetSwitcher({
           </span>
         </button>
         {sheet}
+        {overlays}
       </>
     )
   }
@@ -312,7 +652,7 @@ export function PresetSwitcher({
       <>
         <button
           type="button"
-          onClick={() => setOpen(true)}
+          onClick={openSwitcher}
           aria-haspopup="dialog"
           aria-expanded={open}
           aria-label={`当前布局：${activeName}，点击切换`}
@@ -345,6 +685,7 @@ export function PresetSwitcher({
           </div>
         </button>
         {sheet}
+        {overlays}
       </>
     )
   }
@@ -354,7 +695,7 @@ export function PresetSwitcher({
     <>
       <button
         type="button"
-        onClick={() => setOpen(true)}
+        onClick={openSwitcher}
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-label={`当前布局：${activeName}，点击切换`}
@@ -375,24 +716,203 @@ export function PresetSwitcher({
         />
       </button>
       {sheet}
+      {overlays}
     </>
   )
 }
 
-const PresetGridCard = memo(function PresetGridCard({
+const PRESET_ICONS: Record<string, typeof LayoutTemplate> = {
+  中国资讯: Newspaper,
+  全球视野: Globe,
+  财经商业: BarChart3,
+  科技数码: Cpu,
+  'AI 前沿': Bot,
+  科学知识: FlaskConical,
+  深度人文: BookOpen,
+  文体生活: Trophy,
+}
+
+function PresetGlyph({
+  name,
+  builtin = true,
+  size = 14,
+}: {
+  name: string
+  builtin?: boolean
+  size?: number
+}) {
+  if (!builtin) return <UserRound size={size} strokeWidth={1.75} />
+  const Icon = PRESET_ICONS[name] ?? LayoutTemplate
+  return <Icon size={size} strokeWidth={1.75} />
+}
+
+function ZhihuLogo({ size = 28 }: { size?: number }) {
+  return (
+    <svg
+      data-community-logo="zhihu"
+      data-community-logo-glyph="zhi"
+      data-community-logo-body-size="24"
+      aria-hidden="true"
+      width={size}
+      height={size}
+      viewBox="0 0 28 28"
+      preserveAspectRatio="xMidYMid meet"
+      className="block shrink-0"
+    >
+      {/* 来自用户提供的知乎官方字标 SVG：只保留左侧“知”，移除右侧“乎”。 */}
+      <svg
+        x="2"
+        y="2"
+        width="24"
+        height="24"
+        viewBox="0 0 92 91"
+        preserveAspectRatio="xMidYMid meet"
+      >
+        <path
+          fill="#0F88EB"
+          d="M53.29 80.035l7.32.002 2.41 8.24 13.128-8.24h15.477v-67.98H53.29v67.978zm7.79-60.598h22.756v53.22h-8.73l-8.718 5.473-1.587-5.46-3.72-.012v-53.22zM46.818 43.162h-16.35c.545-8.467.687-16.12.687-22.955h15.987s.615-7.05-2.68-6.97H16.807c1.09-4.1 2.46-8.332 4.1-12.708 0 0-7.523 0-10.085 6.74-1.06 2.78-4.128 13.48-9.592 24.41 1.84-.2 7.927-.37 11.512-6.94.66-1.84.785-2.08 1.605-4.54h9.02c0 3.28-.374 20.9-.526 22.95H6.51c-3.67 0-4.863 7.38-4.863 7.38H22.14C20.765 66.11 13.385 79.24 0 89.62c6.403 1.828 12.784-.29 15.937-3.094 0 0 7.182-6.53 11.12-21.64L43.92 85.18s2.473-8.402-.388-12.496c-2.37-2.788-8.768-10.33-11.496-13.064l-4.57 3.627c1.363-4.368 2.183-8.61 2.46-12.71H49.19s-.027-7.38-2.372-7.38z"
+        />
+      </svg>
+    </svg>
+  )
+}
+
+function LinuxDoLogo({ size = 28 }: { size?: number }) {
+  const clipId = `linuxdo-logo-${useId().replace(/:/g, '')}`
+  return (
+    <svg
+      data-community-logo="linuxdo"
+      data-community-logo-body-size="24"
+      aria-hidden="true"
+      width={size}
+      height={size}
+      viewBox="0 0 28 28"
+      preserveAspectRatio="xMidYMid meet"
+      className="block shrink-0"
+    >
+      <defs>
+        <clipPath id={clipId}>
+          <circle cx="14" cy="14" r="12" />
+        </clipPath>
+      </defs>
+      {/* 与知乎使用完全相同的 24×24 主体外接框，只保留品牌本身的圆/方差异。 */}
+      <circle cx="14" cy="14" r="12" fill="#F0F0F0" />
+      <g clipPath={`url(#${clipId})`}>
+        <rect x="2" y="2" width="24" height="7.2" fill="#1C1C1E" />
+        <rect x="2" y="9.2" width="24" height="9.6" fill="#F0F0F0" />
+        <rect x="2" y="18.8" width="24" height="7.2" fill="#FFB003" />
+      </g>
+    </svg>
+  )
+}
+
+function CommunityGlyph({ id, size = 28 }: { id: string; size?: number }) {
+  if (id === 'zhihu') return <ZhihuLogo size={size} />
+  if (id === 'linuxdo') return <LinuxDoLogo size={size} />
+  return <Globe size={Math.round(size * 0.55)} strokeWidth={1.75} />
+}
+
+function CustomPresetEmptyState({ onCreate }: { onCreate: () => void }) {
+  return (
+    <div className="flex min-h-[190px] flex-col items-center justify-center rounded-2xl border border-haze/80 bg-ink/45 px-5 py-5 text-center">
+      <div className="relative flex size-14 items-center justify-center rounded-2xl border border-haze/80 bg-ink-raised text-paper-muted shadow-xs">
+        <LayoutTemplate size={24} strokeWidth={1.5} />
+        <span className="absolute -bottom-1.5 -right-1.5 flex size-6 items-center justify-center rounded-full border-2 border-ink-raised bg-cinnabar text-white">
+          <Plus size={13} strokeWidth={2.2} />
+        </span>
+      </div>
+      <h3 className="mt-3 font-display text-[15px] font-semibold text-paper">还没有自定义预设</h3>
+      <p className="mt-1 max-w-[260px] text-[11px] leading-relaxed text-paper-faint">
+        按你的阅读偏好组合分类与信源，创建一套自己的首页布局。
+      </p>
+      <button
+        type="button"
+        onClick={onCreate}
+        className="mt-3 inline-flex items-center gap-1.5 rounded-full bg-cinnabar px-4 py-2 text-[11.5px] font-medium text-white shadow-xs transition-opacity hover:opacity-90"
+      >
+        <Plus size={13} strokeWidth={2} />
+        新建预设
+      </button>
+    </div>
+  )
+}
+
+const CommunityEntryCard = memo(function CommunityEntryCard({
   item,
   onPick,
 }: {
-  item: PresetSwitcherItem
+  item: SiteSwitcherItem
   onPick: () => void
 }) {
+  return (
+    <button
+      type="button"
+      onClick={onPick}
+      aria-pressed={item.active}
+      className={`group flex min-w-0 items-center gap-2 rounded-xl border px-2.5 py-2 text-left transition-colors ${
+        item.active
+          ? 'border-cinnabar/60 bg-cinnabar/10'
+          : 'border-haze/80 bg-ink-raised/70 hover:border-cinnabar/35 hover:bg-ink-raised'
+      }`}
+    >
+      <span className="relative flex size-8 shrink-0 items-center justify-center overflow-visible rounded-lg">
+        <CommunityGlyph id={item.id} size={28} />
+        {item.active && (
+          <span className="absolute -bottom-1 -right-1 flex size-4 items-center justify-center rounded-full border-2 border-ink-raised bg-cinnabar text-white shadow-xs">
+            <Check size={9} strokeWidth={2.6} />
+          </span>
+        )}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className={`block truncate font-display text-[12.5px] font-semibold ${item.active ? 'text-cinnabar' : 'text-paper'}`}>
+          {item.name}
+        </span>
+        <span className="mt-0.5 block truncate text-[9.5px] text-paper-faint">
+          {item.id === 'zhihu' ? '问答与观点' : item.id === 'linuxdo' ? '技术社区' : item.description ?? '社区工作区'}
+        </span>
+      </span>
+    </button>
+  )
+})
+
+const PresetGridCard = memo(function PresetGridCard({
+  item,
+  onPick,
+  onManage,
+}: {
+  item: PresetSwitcherItem
+  onPick: () => void
+  onManage?: (anchor: Point) => void
+}) {
+  const longPress = useLongPressAction<string>((_id, anchor) => onManage?.(anchor))
   return (
     <li className="min-w-0">
       <button
         type="button"
-        onClick={onPick}
+        onClick={() => {
+          if (!longPress.consumeClick(item.id)) onPick()
+        }}
+        onPointerDown={onManage ? (event) => longPress.start(item.id, event) : undefined}
+        onPointerMove={longPress.move}
+        onPointerUp={longPress.cancel}
+        onPointerCancel={longPress.cancel}
+        onPointerLeave={longPress.cancel}
+        onContextMenu={onManage ? (event) => {
+          event.preventDefault()
+          longPress.cancel()
+          onManage({ x: event.clientX, y: event.clientY })
+        } : undefined}
+        onKeyDown={onManage ? (event) => {
+          if (event.key !== 'ContextMenu' && !(event.shiftKey && event.key === 'F10')) return
+          event.preventDefault()
+          const rect = event.currentTarget.getBoundingClientRect()
+          onManage({ x: rect.left, y: rect.bottom })
+        } : undefined}
+        aria-haspopup={onManage ? 'menu' : undefined}
+        aria-label={onManage ? `${item.name}，长按管理` : undefined}
         aria-pressed={item.active}
-        className={`group relative flex min-h-[78px] w-full flex-col overflow-hidden rounded-xl border px-2.5 py-2.5 text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cinnabar/45 ${
+        title={item.name}
+        className={`${onManage ? 'custom-long-press-target ' : ''}group relative flex min-h-[78px] h-full w-full flex-col overflow-hidden rounded-xl border px-2.5 py-2.5 text-left transition-all duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cinnabar/45 ${
           item.active
             ? 'border-cinnabar/75 bg-cinnabar/12 shadow-[0_4px_12px_rgba(0,0,0,0.08)]'
             : 'border-haze/80 bg-ink/55 hover:-translate-y-px hover:border-cinnabar/40 hover:bg-ink hover:shadow-sm active:translate-y-0'
@@ -406,15 +926,11 @@ const PresetGridCard = memo(function PresetGridCard({
                 : 'border-haze bg-ink-raised text-paper-muted group-hover:border-cinnabar/35 group-hover:text-cinnabar'
             }`}
           >
-            {item.active ? (
-              <Check size={14} strokeWidth={2.4} />
-            ) : (
-              <LayoutTemplate size={13.5} strokeWidth={1.7} />
-            )}
+            <PresetGlyph name={item.name} builtin={item.builtin} size={14} />
           </span>
 
           <span
-            className={`min-w-0 flex-1 truncate font-display text-[13.5px] font-semibold leading-none transition-colors ${
+            className={`min-w-0 flex-1 truncate pb-[2px] font-display text-[13.5px] font-semibold leading-[1.4] transition-colors ${
               item.active ? 'text-cinnabar' : 'text-paper group-hover:text-cinnabar'
             }`}
           >
@@ -428,7 +944,9 @@ const PresetGridCard = memo(function PresetGridCard({
                 : 'border border-haze/80 bg-ink-raised/70 text-paper-faint group-hover:border-cinnabar/30 group-hover:text-cinnabar'
             }`}
           >
-            {item.active ? '当前' : '选用'}
+            {item.active ? (
+              <span className="inline-flex items-center gap-0.5"><Check size={9} strokeWidth={2.4} />当前</span>
+            ) : '选用'}
           </span>
         </span>
 
@@ -446,62 +964,46 @@ const PresetGridCard = memo(function PresetGridCard({
   )
 })
 
-const PresetPickRow = memo(function PresetPickRow({
-  item,
-  onPick,
+function CmsPresetEmptyState({
+  onAdd,
+  onOpenHelp,
 }: {
-  item: PresetSwitcherItem
-  onPick: () => void
+  onAdd: () => void
+  onOpenHelp?: () => void
 }) {
   return (
-    <li>
-      <button
-        type="button"
-        onClick={onPick}
-        className={`group relative flex w-full items-center gap-3.5 rounded-xl border p-3 text-left transition-colors ${
-          item.active
-            ? 'border-cinnabar/60 bg-cinnabar/12'
-            : 'border-haze/80 bg-ink/50 hover:border-cinnabar/40 hover:bg-ink-raised'
-        }`}
-      >
-        <div
-          className={`flex size-8 shrink-0 items-center justify-center rounded-lg transition-colors ${
-            item.active
-              ? 'bg-cinnabar text-white'
-              : 'bg-ink-raised border border-haze text-paper-muted group-hover:border-cinnabar/40 group-hover:text-cinnabar'
-          }`}
-        >
-          {item.active ? <Check size={16} strokeWidth={2.2} /> : <LayoutTemplate size={15} strokeWidth={1.6} />}
-        </div>
-
-        <span className="min-w-0 flex-1">
-          <span className="flex items-center gap-2">
-            <span
-              className={`truncate font-display text-[15px] font-semibold ${
-                item.active ? 'text-cinnabar' : 'text-paper group-hover:text-paper'
-              }`}
-            >
-              {item.name}
-            </span>
-            {item.active && (
-              <span className="inline-flex items-center rounded-full bg-cinnabar/15 px-1.5 py-0.5 font-mono text-[9px] font-semibold tracking-wider text-cinnabar">
-                当前生效
-              </span>
-            )}
-          </span>
-          {item.description && (
-            <span className="mt-0.5 block truncate text-[12px] text-paper-faint group-hover:text-paper-muted transition-colors">
-              {item.description}
-            </span>
-          )}
+    <div className="flex min-h-[190px] flex-col items-center justify-center rounded-2xl border border-haze/80 bg-ink/45 px-5 py-5 text-center">
+      <div className="relative flex size-14 items-center justify-center rounded-2xl border border-haze/80 bg-ink-raised text-paper-muted shadow-xs">
+        <Layers3 size={24} strokeWidth={1.5} />
+        <span className="absolute -bottom-1.5 -right-1.5 flex size-6 items-center justify-center rounded-full border-2 border-ink-raised bg-cinnabar text-white">
+          <Plus size={13} strokeWidth={2.2} />
         </span>
-
-        {!item.active && (
-          <span className="shrink-0 rounded-full border border-haze/80 bg-ink px-2.5 py-1 font-mono text-[10.5px] font-medium text-paper-faint group-hover:border-cinnabar/40 group-hover:text-cinnabar transition-colors">
-            选用
-          </span>
+      </div>
+      <h3 className="mt-3 font-display text-[15px] font-semibold text-paper">让熟悉的网站成为你的阅读空间</h3>
+      <p className="mt-1 max-w-[260px] text-[11px] leading-relaxed text-paper-faint">
+        支持识别已适配的 CMS 站点。添加站点后，可在这里集中浏览。
+      </p>
+      <div className="mt-3.5 flex flex-wrap items-center justify-center gap-2">
+        <button
+          type="button"
+          onClick={onAdd}
+          className="inline-flex items-center gap-1.5 rounded-full bg-cinnabar px-4 py-2 text-[11.5px] font-medium text-white shadow-xs transition-opacity hover:opacity-90 active:scale-95"
+        >
+          <Plus size={13} strokeWidth={2} />
+          添加站点
+        </button>
+        {onOpenHelp && (
+          <button
+            type="button"
+            onClick={onOpenHelp}
+            aria-label="查看 CMS 站点说明"
+            className="inline-flex items-center gap-1.5 rounded-full border border-haze/90 bg-ink px-3.5 py-2 text-[11.5px] font-medium text-paper-muted transition-colors hover:border-cinnabar/60 hover:text-cinnabar active:scale-95"
+          >
+            <CircleAlert size={13} strokeWidth={1.8} className="text-cinnabar" />
+            了解用途与支持类型
+          </button>
         )}
-      </button>
-    </li>
+      </div>
+    </div>
   )
-})
+}

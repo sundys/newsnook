@@ -1,8 +1,8 @@
 # 内置信源探测笔记
 
-> **权威源**：`src/sources/registry.ts`（本文件只记探测结论、坑与落选理由）  
-> 列表分页策略与 kind 对应见 `pagingStrategyOf`；正文路径除注明外为「feed 自带全文，否则 Readability 抽 `originUrl`」。  
-> 复核基准：2026-08-25
+> **权威源**：`src/sources/registry.ts`（本文件只记探测结论、坑与落选理由）
+> 列表分页策略与 kind 对应见 `pagingStrategyOf`；正文路径除注明外为「feed 自带全文，否则 Readability 抽 `originUrl`」。
+> 复核基准：2026-09-19
 
 ## 1. 分组总览
 
@@ -15,6 +15,10 @@
 - 列表 UA 固定 `NewsApp`
 - 汽车频道：`/nc/auto/list/5Yac5Zyz/0-20.html`（顶层键是 `list` 而非 TID，解析器按数组键兼容）
 - 正文走网易详情接口；图集 / 视频等特殊 `skipType` 按现有解析器处理
+- `dingyue` / `cms-bucket` / `bjnewsrec-cv` / `pic-bucket.ws.126.net` 列表图会对空或外站
+  Referer 返回不可解码的占位图。Web 对网易图链预先走 `/api/image`，代理固定携带
+  `Referer: https://www.163.com/`；Android WebView 直载失败后由原生 HTTP 用同一 Referer
+  重试。两端都先把网易 `http://` 图链升级为 HTTPS，其他图床仍默认直连、失败才代理兜底。
 
 ### 1.2 中文媒体 / 科普（group `cn` / `tech`）
 
@@ -33,7 +37,29 @@
 | `netease-fanpu` `netease-wuli` `netease-diqiu` | netease | 返朴 / 中科院物理所 / 地球知识局：公众号全文同步发布在网易号，走 dy TID 列表接口；正文 `full.html` 偶发 204，由 m/dy 落地页 + Readability 兜底；见 §6 |
 | `swarma` `qianhei` | wechat | 集智俱乐部 / 浅黑科技：wechat2rss 镜像，默认关闭由科普 / 科技深度分类与预设启用；见 §6 |
 
-### 1.3 财经快讯 / 盘面（group `cn`）
+### 1.3 中文深读（group `cn`）
+
+| id | kind | 探测要点 |
+|---|---|---|
+| `thepaper-bookreview` | thepaper | 澎湃「上海书评」；公开 `nodeCont/getByNodeIdPortal` JSON，`nodeId=26878` |
+| `thepaper-people` | thepaper | 澎湃「澎湃人物」；`nodeId=25427` |
+| `thepaper-research` | thepaper | 澎湃「澎湃研究所」；`nodeId=25445` |
+| `thepaper-ideas` | thepaper | 澎湃「思想市场」；`nodeId=25483` |
+| `thepaper-science` | thepaper | 澎湃「科学湃」；`nodeId=27234` |
+| `infzm-depth` | infzm | 南方周末「深度」；公开频道 HTML，`term_id=202` |
+| `infzm-feature` | infzm | 南方周末「特稿」；`term_id=1006` |
+| `infzm-interview` | infzm | 南方周末「对话」；`term_id=217` |
+| `infzm-thinktank` | infzm | 南方周末「智库」；`term_id=219` |
+
+实现边界：
+
+- 9 个信源默认关闭；taxonomy v3 按实际内容拆分到「公共议题 / 观点智库 / 人物访谈 / 科研前沿 / 深度报道 / 中文精选阅读」，不再人为塞进一个“中文深读”大类。
+- 澎湃列表使用 JSON POST；分页不是普通 `pageNum=N`，而是严格沿用上一响应返回的 `startTime`（以及存在时的 `excludeContIds`）作为下一页快照游标。游标会随列表缓存持久化，刷新时重新建立快照。
+- 2026-09-19 实测「思想湃」(`nodeId=26525`) 最新内容仍停留在 2025-01，因此不注册，避免把停更栏目伪装成当前深度信源。
+- 南方周末使用公开 HTML 频道与 `page=N` 上游分页，列表历史日期常省略年份（如 `09-16`），解析器按抓取时间推断年份并处理跨年。
+- 正文统一走现有 `resolveBody` / Readability / 图片归一化 / 缓存链。仅处理当前访问会话能获得的公开内容；会员、付费墙、登录或反爬限制不绕过，命中时继续使用现有摘要 + 打开原文软降级。
+
+### 1.4 财经快讯 / 盘面（group `cn`）
 
 | id | kind | 探测要点 |
 |---|---|---|
@@ -42,35 +68,42 @@
 | `eastmoney-news` | eastmoney-news | `np-listapi` 按 `page_index` 翻页，需 Referer |
 | `wscn-live` | wscn-live | awtmt.com lives 接口，需 Accept + Referer |
 
-### 1.4 国际（group `intl`）
+### 1.5 国际（group `intl`）
 
 | id | kind | 探测要点 |
 |---|---|---|
-| `bbc-zh` `bbc-zh-china` `bbc-zh-world` | feed | 简体 RSS 已 301 → 繁体；china/world 旧 index.xml 停在 2011–2014 归档，统一用 `zhongwen/trad/rss.xml` |
-| `bbc-world` `bbc-business` | feed | feeds.bbci.co.uk 标准 RSS |
+| `bbc-zh` | bbc-chinese | BBC 官方 `/zhongwen/simp` 简体首页。公开 simp RSS 会 301 到 `zhongwen/trad/rss.xml`，因此改为解析第一方 Next.js `__NEXT_DATA__`；正文链接固定 `/simp`，并用 `cacheVersion=simp-v1` 淘汰旧繁体列表缓存 |
+| `nytimes-zh` | feed | 纽约时报中文网第一方 `/rss/`，2026-09-24 实测 `application/xml` 且持续更新 |
+| `rfi-zh` | feed | RFI 中文第一方 `/cn/rss`，`zh-Hans` |
+| `dw-top` | feed | DW 中文 RDF `rss-chi-all`；旧配置误接 `rss-en-top` 已修正 |
+| `ftchinese` | feed | FT中文网第一方 `/rss/feed`，`zh-CN` |
+| `voa-zh` | feed | 美国之音中文网 RSS 页面当前“新闻”聚合源 |
+| `zaobao-world` | zaobao | 联合早报无可用第一方 RSS；解析公开 `/news/world` 服务端 HTML，不依赖 RSSHub / FeedX |
+| `bbc-world` `bbc-business` `dw-en` | feed | BBC / DW 英文第一方 RSS |
+| `nytimes-world` `wsj-world` `nikkei-asia` `channelnewsasia-world` | feed | NYT World、WSJ World、Nikkei Asia、Channel NewsAsia World 第一方 RSS |
 | `gnews-*`（7 个) | google-news | headlines section RSS；跳转链接解码见 `google-news-decode` 测试 |
-| `dw-top` | feed | RDF 格式 |
-| `scmp-china` `scmp-news` | feed | `/rss/4/feed/`、`/rss/91/feed/` |
+| `scmp-china` `scmp-news` | feed | SCMP 官方 RSS；内容为英文，`scmp-china` 表示 China 栏而非中文站 |
 | `npr` `guardian-world` `aljazeera` | feed | 标准 RSS |
 | `france24` | feed | `/en/rss` 已 301 到 HTML 目录页；用仍返回 `application/rss+xml` 的分区源（asia-pacific） |
-| `foreign-affairs` `nyrb` `bloomberg-opinion` `project-syndicate` `sinocism` `theinitium` | feed | 深度长文 / 智库；均标准 RSS，默认关闭 |
+| `foreign-affairs` `nyrb` `bloomberg-opinion` `project-syndicate` `sinocism` | feed | 英文评论 / 智库；taxonomy v3 按主题唯一归属到「全球视野·国际评论」「深度人文·海外思想长文」「财经商业·产业评论」「中国资讯·外部观察」 |
+| `theinitium` | feed | 端传媒官方简体 RSS `/zh-hans/rss/`（根路径 `/rss/` 默认繁体）；`cacheVersion=zh-hans-v1` 淘汰旧繁体列表缓存；归「全球视野 → 中文报刊通讯」 |
 
-### 1.5 科技深度（group `tech`）
+### 1.6 科技深度（group `tech`）
 
 | id | kind | 探测要点 |
 |---|---|---|
 | `arstechnica` `mittr` `verge` `techcrunch` `wired` `quanta` `stratechery` `vitalik` `fabricated-knowledge` `construction-physics` | feed | 标准 RSS/Atom；Substack 系（vitalik 等）feed 自带全文 |
 | `paulgraham` | paulgraham | 无 RSS；解析 `articles.html` 静态列表，无真实日期（`hasRealDate=false`） |
 
-> `hn` / `v2ex` 归 **AI 社区栏**（见 §5），不在本表。
+> taxonomy v3 中 `hn` / `v2ex` 与 `infoq-cn` / `ruanyifeng` 统一归 **科技数码 → 开发者社区**；AI 预设不再重复挂开发者综合社区。
 
-### 1.6 AI（group `ai`）
+### 1.7 AI（group `ai`）
 
 | id | kind | 探测要点 |
 |---|---|---|
 | `qbitai` `leiphone` `synced` | feed | 标准 RSS |
 | `jiqizhixin` | jiqizhixin | 无 RSS；文章库 JSON API（列表摘要，正文取详情 JSON），需 Referer + Accept |
-| `aiera` | wordpress | WP 站但 `/feed` 常年 500；走 WP REST `wp-json/wp/v2/posts` |
+| `aiera` | wordpress | WP 站但 `/feed` 常年 500；列表走 WP REST `wp-json/wp/v2/posts`。2026-09 新版 `asi-post.html?id=...` 仅返回动态加载壳，正文按 id 回读单篇 WP REST 详情，避免 Readability 把导航/页脚误判为正文 |
 | `zhidx` | wordpress | 同新智元：`/feed` 500；WP REST 可用，30 条中 29 条 `content.rendered` 全文（2026-08-25 实测） |
 | `baoyu` | feed | `baoyu.io/feed.xml`（302 → `s.baoyu.io`，代理跟随正常）；RSS 仅摘要，正文 Readability 抽静态页（Astro，全文在 DOM，实测 1k–5k 字） |
 | `oneusefulthing` `understandingai` `latent-space` `thezvi` | feed | Substack，feed 自带全文；`understandingai` 约 2 成付费文截断、回落 Readability；`thezvi` feed 近 2 MB、单篇极长，默认关闭 |
@@ -86,7 +119,7 @@
 | `uisdc-aigc` | uisdc | 优设 AIGC 标签页，无 RSS；解析归档 HTML + `/page/N` 翻页，正文 Readability；见 §4 |
 | `woshipm-ai` | feed | 人人都是产品经理 AI 分类 WP feed，全文；见 §4 |
 
-### 1.7 专栏 / 轻松（group `special`）
+### 1.8 专栏 / 轻松（group `special`）
 
 | id | kind | 探测要点 |
 |---|---|---|
@@ -193,8 +226,7 @@ WebView 观察页面的网络、DOM、MSE 与 DRM 信号；接口或观察失败
 命中后走换 UA → 翻译镜像 → 摘要 + 打开原文的既有软降级链。移动端住宅网络通常两种
 形态均可正常返回文章 HTML。
 
-首轮收录 4 个；二轮甄选（§5）移除差评，现存 3 个（均默认关闭，由「深读 / 社区」分类与
-「极客与 AI」预设承接）：
+首轮收录 4 个；二轮甄选（§5）移除差评，现存 3 个（均默认关闭；taxonomy v3 分别进入「AI研究工程 / AI思想产业」）：
 
 | id | 公众号 | 定位 | feed 体积 | 备注 |
 |---|---|---|---|---|
@@ -269,10 +301,10 @@ WebView 观察页面的网络、DOM、MSE 与 DRM 信号；接口或观察失败
 | id | 判定 | 依据（最近 12 条抽检） |
 |---|---|---|
 | `xixiaoyao` 夕小瑶科技说 | **retain** | 中位 2.6k 字、12/12 ≥800 字；「实测扣子桌面端」「连夜实测 DeepSeek V4 Pro，低于预期，不推荐」等一手实测约占半，其余为快讯化解读（偶有「被曝」体标题，已知噪声）；镜像池内中文实测稀缺，保留 |
-| `paperweekly` PaperWeekly | **retain**（不进默认预设） | 中位 3.9k 字、11/12 ≥800 字，论文深读题材专一、质量稳定；但学术向 + feed ~2.9MB，留在 **社区**分类按需开启 |
+| `paperweekly` PaperWeekly | **retain** | 中位 3.9k 字、11/12 ≥800 字，论文深读题材专一、质量稳定；taxonomy v3 归「AI研究工程」 |
 | `42zhangjing` 42章经 | **retain** | 中位 6.8k 字深度访谈/长文（「泡沫的四个必要不充分条件」「Agent 动力学」），月 2–3 篇低频高信噪；3/12 为短活动帖，可接受 |
 | `chaping` 差评 | **remove** | 每日固定「今日最佳」「聊一聊」互动帖（51–101 字），题材泛科技吃瓜（速成车 / 东方甄选 / 社会报道），4/12 <800 字；既非 AI 深读也非顶尖评测，注册表整条移除 |
-| `uisdc-aigc` 优设 AIGC | retain | AIGC 教程/实测图文 4k–10k 字，「体验解读」价值成立；社区栏首位，默认进入「极客与 AI」预设 |
+| `uisdc-aigc` 优设 AIGC | retain | AIGC 教程/实测图文 4k–10k 字，「体验解读」价值成立；taxonomy v3 归「AI产品实践」 |
 | `woshipm-ai` 人人PM AI | retain（不进默认预设） | 中位 4.2k 字，含真横评（「横评 GLM-5.3 / DeepSeek-v4-pro / K3」）与 Agent 落地实战；UGC 质量波动、单日可达 6 篇，默认关 |
 
 ### 5.3 新候选探测（wechat2rss 免费列表 395 个号全量比对）
@@ -289,39 +321,36 @@ WebView 观察页面的网络、DOM、MSE 与 DRM 信号；接口或观察失败
 | 我爱计算机视觉 | CV 论文解读向，题材窄且与 PaperWeekly 重叠，落选 |
 | 腾讯技术工程 / 阿里技术 | 大厂工程博客，非 AI 深度解读定位，落选 |
 
-### 5.4 AI 分类分层与预设启用集合
+### 5.4 AI taxonomy v3（2026-09-24）
 
-- 分类拆六栏（`categories.ts`；2026-08-26 起官方一手按厂商拆分），2026-09-07 起业界 / 深读 / 社区再按正文语言拆「·外刊」：
-  - `ai-openai`（**OpenAI**：News · Cookbook）
-  - `ai-claude`（**Claude**：Anthropic 新闻 · Claude 博客 / 客户案例 / 学院用例与教程）
-  - `ai`（**实验室**：Google AI · DeepMind · Hugging Face · PyTorch · Arena）
-  - `ai-media`（**业界**：中文媒体快报）/ `ai-media-world`（**业界·外刊**：MIT/Verge/IEEE 等）
-  - `ai-depth`（**深读**：中文解读评测）/ `ai-depth-world`（**深读·外刊**：Mollick / Latent / 周报作者博）
-  - `ai-community`（**社区**：优设 AIGC 首位 · V2EX · PaperWeekly · 人人 PM）/ `ai-community-world`（**社区·外刊**：HN）
-  上述栏均在 `DEFAULT_HIDDEN_CATEGORY_IDS`（新装默认隐藏，由场景预设或分类管理打开）。
-- 「极客与 AI」预设（`presets.ts`）可见顺序：业界 → 深读 → 社区 → 科技 → 科普 → 科技深度（中文）→
-  对应外刊栏 → OpenAI → Claude → 实验室；综合（mix）隐藏。
-- 「商业创投」预设的中文 AI 媒体快报挂 `ai-media`，外刊挂 `ai-media-world`，
-  不再借用 `ai` 栏。
-- 兼容性：老用户已持久化的 `hiddenCategoryIds` 若不含新建栏 id，升级后「业界 / 社区」可能短暂可见，
-  可在分类管理隐藏或重新应用预设归位，无数据丢失。`chaping` 移除后，
-  `normalizePreferences` / `normalizeSnapshot` 会自动从旧偏好与预设快照中剔除该 id。
+AI 不再按“厂商品牌 / 中文外刊 / 社区”交叉建栏，而是在唯一的 **AI 前沿** 预设里按阅读任务分 7 类：
+
+- `ai-labs` **模型厂商与实验室**：OpenAI News、Anthropic News、Claude Blog、Google AI、DeepMind。
+- `ai-ecosystem` **开源生态与评测**：Hugging Face、PyTorch、Arena。
+- `ai-practice` **产品实践**：OpenAI Cookbook、Claude Customers / Academy、优设 AIGC、人人 PM AI。
+- `ai-media-cn` **中文AI媒体**：量子位、机器之心、新智元、雷锋网、智东西。
+- `ai-media-en` **海外AI媒体**：Synced、MIT TR AI、Verge AI、IEEE、VentureBeat、MarkTechPost。
+- `ai-engineering` **AI研究工程**：PaperWeekly、夕小瑶、Simon Willison、Latent Space、Interconnects、Lil’Log。
+- `ai-thinking` **AI思想产业**：宝玉、One Useful Thing、Understanding AI、Zvi、42章经。
+- `ai-watch` **AI周报观察**：Last Week in AI、Import AI、Ahead of AI。
+
+V2 的内置 taxonomy 是全局互斥分区：一个内置信源只属于一个预设、一个分类。Hacker News / V2EX / InfoQ / 阮一峰因此统一进入「科技数码 → 开发者社区」，不会再同时出现在 AI 社区栏。旧用户布局升级时会物化为自定义分类/预设，不按新 taxonomy 猜测重排。
 
 ## 6. 硬科技 / 科普信源扩充（2026-08-25）
 
 背景：用户点名收录 **集智俱乐部 / 长尾科技 / 地球知识局** 及同档硬科普号。
 甄选标准与 §5 不同：本轮要的是**深度科普 / 硬核解读 / 科研进展**（不是 AI 产品评测档），
-拒绝营销软文与课程招生刷屏；归属 **科普 `science`**（浅黑科技归科技深度），不进 AI 分层。
+拒绝营销软文与课程招生刷屏；taxonomy v3 中分别归属 **基础科学 / 科研前沿 / 地理观察 / 技术深读**，不进 AI 分层。
 
 ### 6.1 收录（5 个）
 
 | id | 源 | 路径 | 抽检（2026-08-25） | 结论 |
 |---|---|---|---|---|
-| `swarma` | 集智俱乐部 | wechat2rss 镜像（feed ~5.7MB，列表剥离全文兜住） | 20 条中位 4.1k 字、20/20 ≥800 字，最新 2026-08-24；复杂系统 / 统计物理 / AI 交叉深读 | 收录。官网 swarma.org `/feed` 404、`/?feed=rss2` 可用但停更于 2025-10，只能走镜像；默认关（镜像政策），科普分类与「极客与 AI」预设启用 |
+| `swarma` | 集智俱乐部 | wechat2rss 镜像（feed ~5.7MB，列表剥离全文兜住） | 20 条中位 4.1k 字、20/20 ≥800 字，最新 2026-08-24；复杂系统 / 统计物理 / AI 交叉深读 | 收录。官网 swarma.org `/feed` 404、`/?feed=rss2` 可用但停更于 2025-10，只能走镜像；默认关（镜像政策），taxonomy v3 归「科学知识 → 科研前沿」 |
 | `qianhei` | 浅黑科技 | wechat2rss 镜像（feed ~4.4MB） | 20 条中位 12.1k 字、20/20 ≥800 字；硬科技长文特稿（国产制造 / 安全 / 基础设施），月更 1–2 篇，最新 2026-06-01 | 收录进 **科技深度**。低频大体积默认关，分类内可见 |
 | `netease-fanpu` | 返朴 | 网易号 `T1551235486149`（dy TID 列表） | 20 条/页、offset 翻页正常、日更 1–3 篇；脑科学 / 数学 / 物理严肃科普 | 收录。官网 fanpu.cn 域名不可达；默认开（与果壳 / 泛科学等科普源一致） |
 | `netease-wuli` | 中科院物理所 | 网易号 `T1479706079278` | 20 条/页、日更；生活物理问答 + 科研进展科普 | 收录，默认开 |
-| `netease-diqiu` | 地球知识局 | 网易号 `T1479097401984` | 20 条/页、日更约 1 篇；人文地理科普，正文实测 2k+ 字带图 | 收录，默认开；进「全景门户」科普栏 |
+| `netease-diqiu` | 地球知识局 | 网易号 `T1479097401984` | 20 条/页、日更约 1 篇；人文地理科普，正文实测 2k+ 字带图 | 收录，默认开；taxonomy v3 归「科学知识 → 地理观察」 |
 
 网易号正文路径实测：`c.m.163.com/nc/article/{docid}/full.html` 对地球知识局直接返回 JSON 正文；
 返朴 / 物理所偶发 204（既有已知行为，`resolveBody` 注释有记录），
@@ -330,9 +359,7 @@ Readability 兜底（实测正文块 2.4k–10.6k 字），站内全文成立。
 新源 id 保持 `netease` 前缀（正文兜底按前缀路由），列表 UA 固定 `NewsApp`。
 
 默认 `enabled` 判断：网易号三源接口与既有网易频道同稳，比照果壳 / 泛科学 / 环球科学 / 知识分子
-默认开；两个 wechat 镜像源沿用「第三方镜像默认关，由分类 / 预设启用」的既有政策（§4.1）。
-预设挂载：全景门户科普栏 + 地球知识局；「极客与 AI」科普栏 + 返朴 / 物理所 / 集智、
-科技深度栏 + 浅黑；「慢读知性」科普栏 + 返朴 / 地球知识局。
+默认开；两个 wechat 镜像源沿用「第三方镜像默认关」的既有政策（§4.1）。taxonomy v3 唯一归属：返朴 / 物理所 →「基础科学」，集智 →「科研前沿」，地球知识局 →「地理观察」，浅黑 →「技术深读」。
 
 ### 6.2 落选记录
 
@@ -353,7 +380,7 @@ Readability 兜底（实测正文块 2.4k–10.6k 字），站内全文成立。
 ## 7. AI 一手官方源扩充（2026-08-26）
 
 背景：补齐 OpenAI / Anthropic（Claude）官方一手内容并默认启用；既有 `anthropic` /
-`openai-news` 保留不动（后者由默认关改为默认开）。全部归 **源头 `ai`** 分类，
+`openai-news` 保留不动（后者由默认关改为默认开）。taxonomy v3 中模型厂商/实验室内容归 `ai-labs`，Hugging Face / PyTorch / Arena 归 `ai-ecosystem`，教程/案例归 `ai-practice`；
 分页策略 `client-catalog`，正文走通用 Readability；`claude.com` 加入智能分流国际域名
 （`academy.claude.com` 由后缀匹配覆盖；`developers.openai.com` 已被既有 `openai.com` 覆盖）。
 
@@ -372,13 +399,18 @@ Readability 兜底（实测正文块 2.4k–10.6k 字），站内全文成立。
 `academy.claude.com/use-cases/` 307 → 无斜杠；`developers.openai.com/cookbook/` 308 → 无斜杠；
 claude.com 两个路径带不带斜杠均 200。
 
-### 7.2 分类与预设（2026-08-26 按厂商拆栏）
+### 7.2 taxonomy v3 分类与预设
 
-- 五个新源与 `openai-news` 全部默认启用；官方一手按厂商拆三栏：OpenAI 两源归 `ai-openai`，
-  Anthropic / Claude 五源归 `ai-claude`，其余实验室（Google AI / DeepMind / HF / PyTorch / Arena）
-  留在 `ai`（label 由「源头」改为「实验室」），分类互斥不变量保持（栏目全貌见 §5.4）；
-- 「极客与 AI」预设 OpenAI / Claude 两栏整栏启用（含案例 / 学院低频源），
-  实验室栏启用 Google AI / DeepMind / HF / Arena（PyTorch 留在分类里可一键开启）。
+- 五个新源与 `openai-news` 全部默认启用。
+- `openai-news`、`anthropic`、`claude-blog` 与 Google AI / DeepMind 进入 `ai-labs`「模型厂商与实验室」。
+- Hugging Face / PyTorch / Arena 进入 `ai-ecosystem`「开源生态与评测」，不再混入“实验室”。
+- `openai-cookbook`、`claude-customers`、Claude Academy 用例/教程进入 `ai-practice`「产品实践」。
+- 两类都只出现在 **AI 前沿** 预设；不再为 OpenAI / Claude 各建一级分类，从而保持“分类表达阅读任务、频道表达品牌”的信息架构。
 
 验证：`npm run test:ai-firstparty`（注册 / 分类 / 分流 / 分页断言 + 三个解析器 fixture 与兜底路径），
 `npm run test:high-signal`、`npm run test:layout-presets`、`npm run test:category-source-usage`。
+
+
+## 自建目录案例：香菇影视（2026-10-10）
+
+该站使用飞飞 CMS 特征与自定义模板：`Public/js/system.js`、`cms` 全局配置、`ff-search` 与 `data-action` 重写搜索路径共同构成身份和能力证据，不据此断言精确版本。当前目录服务可抽取首页/栏目，栏目页使用实际 `hjs1.html` → `hjs2.html` 链接。改动属于通用飞飞规则及 DOM/表单能力发现，未添加域名特判。该案例不是内置订阅。公开页 smoke 与离线回归的边界见 [CMS 适配说明](./cms-catalog.md)。

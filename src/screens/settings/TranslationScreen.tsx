@@ -418,14 +418,14 @@ export function TranslationScreen({ prefs, onChange, onBack, onOpenAiSettings }:
           {([
             {
               id: 'compare' as const,
-              label: '对比翻译',
-              caption: '段下附译文',
+              label: '双语对照',
+              caption: '段下附译文 · 对比研读',
               icon: Languages,
             },
             {
               id: 'replace' as const,
-              label: '全文替代',
-              caption: '只显示译文',
+              label: '仅显示译文',
+              caption: '全文替代 · 沉浸阅读',
               icon: FileText,
             },
           ]).map((mode) => {

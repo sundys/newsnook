@@ -38,6 +38,45 @@ function neteaseList(tid: string): string {
   return `https://c.m.163.com/nc/article/list/${tid}/0-${NETEASE_PAGE_SIZE}.html`
 }
 
+function thepaperChannel(id: string, name: string, nodeId: number): NewsSource {
+  return {
+    id,
+    name,
+    label: name.replace(/^澎湃 · /, ''),
+    group: 'cn',
+    kind: 'thepaper',
+    url: 'https://api.thepaper.cn/contentapi/nodeCont/getByNodeIdPortal',
+    siteUrl: `https://www.thepaper.cn/list_${nodeId}`,
+    requestMethod: 'POST',
+    requestBodyType: 'json',
+    requestJson: { nodeId, pageNum: 1, pageSize: 20 },
+    requestHeaders: {
+      Origin: 'https://www.thepaper.cn',
+      Referer: 'https://www.thepaper.cn/',
+      Accept: 'application/json, text/plain, */*',
+    },
+    enabled: false,
+  }
+}
+
+function infzmChannel(id: string, name: string, termId: number): NewsSource {
+  return {
+    id,
+    name,
+    label: name.replace(/^南方周末 · /, ''),
+    group: 'cn',
+    kind: 'infzm',
+    url: `https://www.infzm.com/contents?term_id=${termId}&page=1`,
+    siteUrl: `https://www.infzm.com/contents?term_id=${termId}`,
+    // 南周会把 Android / Mobile UA 302 到旧版 /wap/#/... 路由；服务端随后把
+    // hash 编码进路径并返回 404，导致 App 四个频道全部抓取失败。固定桌面 UA，
+    // 让原生 CapacitorHttp、Vite 与 Cloudflare feed 代理都命中可解析的公开 HTML 列表。
+    userAgent: DESKTOP_UA,
+    requestHeaders: { Referer: 'https://www.infzm.com/' },
+    enabled: false,
+  }
+}
+
 function neteaseChannel(
   id: string,
   name: string,
@@ -220,6 +259,18 @@ export const SOURCES: NewsSource[] = [
   },
   // 晚点无 RSS；首页列表走 POST /site/index
   // 站点证书链不完整：Feed 代理已 secure:false；正文 /api/page 对 TLS 错误会 insecure 回退
+  // —— 中文深读：澎湃 / 南方周末 ——
+  // 澎湃仅收录 2026-09 实测仍持续更新的栏目；已停更的「思想湃」不注册。
+  thepaperChannel('thepaper-bookreview', '澎湃 · 上海书评', 26878),
+  thepaperChannel('thepaper-people', '澎湃 · 澎湃人物', 25427),
+  thepaperChannel('thepaper-research', '澎湃 · 澎湃研究所', 25445),
+  thepaperChannel('thepaper-ideas', '澎湃 · 思想市场', 25483),
+  thepaperChannel('thepaper-science', '澎湃 · 科学湃', 27234),
+  infzmChannel('infzm-depth', '南方周末 · 深度', 202),
+  infzmChannel('infzm-feature', '南方周末 · 特稿', 1006),
+  infzmChannel('infzm-interview', '南方周末 · 对话', 217),
+  infzmChannel('infzm-thinktank', '南方周末 · 智库', 219),
+
   {
     id: 'latepost',
     name: '晚点 LatePost',
@@ -293,12 +344,43 @@ export const SOURCES: NewsSource[] = [
     enabled: true,
   },
 
-  // —— 国际 ——
-  // BBC 中文简体 RSS 已 301 → 繁体；china/world 旧 index.xml 停在 2011–2014 归档，改用现行 feeds
-  { id: 'bbc-zh', name: 'BBC 中文', label: 'BBC中文', group: 'intl', kind: 'feed', url: 'https://feeds.bbci.co.uk/zhongwen/trad/rss.xml', enabled: true },
-  { id: 'bbc-zh-china', name: 'BBC 中文 · 中国', label: 'BBC中国', group: 'intl', kind: 'feed', url: 'https://feeds.bbci.co.uk/zhongwen/trad/rss.xml', enabled: false },
-  { id: 'bbc-zh-world', name: 'BBC 中文 · 国际', label: 'BBC国际', group: 'intl', kind: 'feed', url: 'https://feeds.bbci.co.uk/zhongwen/trad/rss.xml', enabled: false },
+  // —— 国际中文 ——
+  // BBC 官方 simp 首页仍提供简体中文，但公开 RSS 的 simp 地址会 301 到繁体 feed；
+  // 因此直接解析第一方简体首页的 Next.js 数据，避免把繁体内容误标为「BBC 中文」。
+  {
+    id: 'bbc-zh',
+    name: 'BBC 中文',
+    label: 'BBC中文',
+    group: 'intl',
+    kind: 'bbc-chinese',
+    url: 'https://www.bbc.com/zhongwen/simp',
+    siteUrl: 'https://www.bbc.com/zhongwen/simp',
+    cacheVersion: 'simp-v1',
+    enabled: true,
+  },
+  { id: 'nytimes-zh', name: '纽约时报中文网', label: '纽约时报中文', group: 'intl', kind: 'feed', url: 'https://cn.nytimes.com/rss/', enabled: false },
+  { id: 'rfi-zh', name: '法国国际广播电台中文', label: 'RFI中文', group: 'intl', kind: 'feed', url: 'https://www.rfi.fr/cn/rss', enabled: false },
+  { id: 'dw-top', name: 'DW 中文', label: 'DW中文', group: 'intl', kind: 'feed', url: 'https://rss.dw.com/rdf/rss-chi-all', enabled: true },
+  { id: 'ftchinese', name: 'FT中文网', label: 'FT中文', group: 'intl', kind: 'feed', url: 'https://www.ftchinese.com/rss/feed', enabled: false },
+  { id: 'voa-zh', name: '美国之音中文网', label: 'VOA中文', group: 'intl', kind: 'feed', url: 'https://www.voachinese.com/api/zm_yqebbyi', enabled: false },
+  {
+    id: 'zaobao-world',
+    name: '联合早报 · 国际',
+    label: '联合早报',
+    group: 'intl',
+    kind: 'zaobao',
+    url: 'https://www.zaobao.com.sg/news/world',
+    userAgent: DESKTOP_UA,
+    enabled: false,
+  },
+
+  // —— 国际英文 ——
   { id: 'bbc-world', name: 'BBC World', label: 'BBC World', group: 'intl', kind: 'feed', url: 'https://feeds.bbci.co.uk/news/world/rss.xml', enabled: false },
+  { id: 'dw-en', name: 'DW English', label: 'DW English', group: 'intl', kind: 'feed', url: 'https://rss.dw.com/rdf/rss-en-top', enabled: false },
+  { id: 'nytimes-world', name: 'The New York Times · World', label: 'NYT World', group: 'intl', kind: 'feed', url: 'https://rss.nytimes.com/services/xml/rss/nyt/World.xml', enabled: false },
+  { id: 'wsj-world', name: 'The Wall Street Journal · World News', label: 'WSJ World', group: 'intl', kind: 'feed', url: 'https://feeds.a.dj.com/rss/RSSWorldNews.xml', enabled: false },
+  { id: 'nikkei-asia', name: 'Nikkei Asia', label: 'Nikkei Asia', group: 'intl', kind: 'feed', url: 'https://asia.nikkei.com/rss/feed/nar', enabled: false },
+  { id: 'channelnewsasia-world', name: 'CNA · World', label: 'CNA World', group: 'intl', kind: 'feed', url: 'https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6311', enabled: false },
   {
     id: 'gnews-world',
     name: 'Google 全球',
@@ -362,7 +444,6 @@ export const SOURCES: NewsSource[] = [
     url: 'https://news.google.com/rss/headlines/section/topic/HEALTH?hl=en-US&gl=US&ceid=US:en',
     enabled: false,
   },
-  { id: 'dw-top', name: 'DW 德国之声', label: 'DW', group: 'intl', kind: 'feed', url: 'https://rss.dw.com/rdf/rss-en-top', enabled: true },
   { id: 'scmp-china', name: 'SCMP 中国', label: 'SCMP', group: 'intl', kind: 'feed', url: 'https://www.scmp.com/rss/4/feed/', enabled: true },
   { id: 'scmp-news', name: 'SCMP News', label: 'SCMP News', group: 'intl', kind: 'feed', url: 'https://www.scmp.com/rss/91/feed/', enabled: false },
   { id: 'npr', name: 'NPR News', label: 'NPR', group: 'intl', kind: 'feed', url: 'https://feeds.npr.org/1001/rss.xml', enabled: true },
@@ -642,7 +723,10 @@ export const SOURCES: NewsSource[] = [
     label: '端传媒',
     group: 'intl',
     kind: 'feed',
-    url: 'https://theinitium.com/rss/',
+    // 根路径 /rss/ 默认繁体；官方简体频道在 /zh-hans/rss/
+    url: 'https://theinitium.com/zh-hans/rss/',
+    siteUrl: 'https://theinitium.com/zh-hans/',
+    cacheVersion: 'zh-hans-v1',
     enabled: false,
   },
   {

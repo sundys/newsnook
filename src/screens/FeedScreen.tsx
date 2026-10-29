@@ -2,7 +2,9 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { ChevronLeft, Loader2, RotateCw, Search, X } from 'lucide-react'
 
 import { ArticleRow, LeadStory } from '../components/ArticleItem'
+import { BrandLogo } from '../components/BrandLogo'
 import { CategoryRail } from '../components/CategoryRail'
+import { FeedLayoutSwitcher } from '../components/FeedLayoutSwitcher'
 import { FeedSkeleton } from '../components/FeedSkeleton'
 import { PullIndicator } from '../components/PullIndicator'
 import { SourceFilterChips } from '../components/SourceFilterChips'
@@ -18,12 +20,13 @@ import type { Article, RefreshProgress, SourceStatus } from '../lib/types'
 import { DEFAULT_TRANSLATION_PREFS } from '../features/translation/config'
 import { useFeedTranslation } from '../features/translation/useFeedTranslation'
 import type { TranslationPrefs } from '../features/translation/types'
-import { extractCatalog } from '../features/catalogEngine/engine'
-import { catalogHtmlToArticles } from '../features/catalogEngine/toArticles'
+import { useCatalogSession } from '../features/siteCatalog/useCatalogSession'
+import { catalogProfileFor } from '../features/siteCatalog/profile'
+import { catalogSearchRequest } from '../features/siteCatalog/requests'
 import { RECOMMEND_CATEGORY_ID, type CategoryId, type NewsCategory } from '../sources/categories'
 import type { HomeFeedLayout } from '../sources/preferences'
 import { findSource, type NewsSource } from '../sources/registry'
-import { fetchAbsoluteText } from '../lib/http'
+import type { ResolvedTheme } from '../lib/theme'
 
 const EMPTY_ARTICLE_IDS: ReadonlySet<string> = new Set()
 
@@ -44,6 +47,8 @@ interface Props {
   showLead: boolean
   /** 主首页信息流版式；未传时保持历史经典列表。 */
   homeFeedLayout?: HomeFeedLayout
+  /** 切换首页信息流版式 */
+  onHomeFeedLayoutChange?: (layout: HomeFeedLayout) => void
   /** 内容全部来自本地缓存，尚未拿到本次联网结果 */
   offline?: boolean
   categories?: NewsCategory[]
@@ -57,9 +62,11 @@ interface Props {
   onSelectSource?: (sourceId: string | null) => void
   favoriteSourceIds?: readonly string[]
   onToggleFavoriteSource?: (sourceId: string) => void
+  onRenameSource?: (sourceId: string, name: string) => void
   onRemoveSource?: (sourceId: string) => void
   onRemoveCategory?: (categoryId: CategoryId) => void
   onRenameCategory?: (categoryId: CategoryId, name: string) => void
+  onMoveCategory?: (categoryId: CategoryId, direction: -1 | 1) => void
   /** 预览邻页用：按分类取已缓存的文章，横滑时并排露出 */
   articlesForCategory?: (id: CategoryId) => Article[]
   translationPrefs?: TranslationPrefs
@@ -75,10 +82,8 @@ interface Props {
   onOpenLocalSearch?: () => void
   /** 递增时触发与下拉相同的刷新动画与加载（底栏双击速闻） */
   pullRefreshSeq?: number
-  /** 站内搜索模板（仅 web-catalog 源有 frameworkHint.searchTemplate 时传入） */
-  searchTemplate?: string
-  /** 框架站点分类列表（frameworkHint.categories） */
-  frameworkCategories?: { title: string; url: string }[]
+  catalogSource?: NewsSource
+  resolvedTheme?: ResolvedTheme
 }
 
 /** 邻页预览：排版与正式列表对齐，并恢复该分类上次滚动位置，避免滑入时先顶后跳 */
@@ -151,34 +156,45 @@ function CategoryPeek({
             variant="lead"
           />
         )}
-        {grouped.map(([bucket, items]) => (
-          <div key={bucket}>
-            <div className={homeFeedLayout === 'cards'
-              ? 'flex items-center gap-2.5 px-3.5 pt-4 pb-1.5 min-[430px]:px-4'
-              : 'page-x flex items-center gap-2.5 pt-5 pb-1.5'}>
-              <span className={homeFeedLayout === 'cards'
-                ? 'font-display text-[13px] font-medium tracking-[0.08em] text-paper-muted'
-                : 'font-mono text-[11px] font-medium tracking-[0.16em] text-paper-muted'}>{bucket}</span>
-              <span className="h-px flex-1 bg-haze" aria-hidden />
+        {homeFeedLayout === 'cards' ? (
+          <ul className="grid grid-cols-1 items-start gap-2.5 px-3.5 py-2.5 min-[360px]:grid-cols-2 min-[430px]:gap-3 min-[430px]:px-4">
+            {rest.map((article) => (
+              <ArticleRow
+                key={article.id}
+                article={article}
+                read={readIds.has(article.id)}
+                saved={laterIds.has(article.id)}
+                prestored={prestoredIds.has(article.id)}
+                onOpen={onOpen}
+                revealed
+                variant="compact-card"
+              />
+            ))}
+          </ul>
+        ) : (
+          grouped.map(([bucket, items]) => (
+            <div key={bucket}>
+              <div className="page-x flex items-center gap-2.5 pt-5 pb-2">
+                <span className="font-mono text-[11px] font-medium tracking-[0.18em] text-paper-muted/90">{bucket}</span>
+                <span className="h-px w-8 bg-gradient-to-r from-haze/80 to-transparent" aria-hidden />
+              </div>
+              <ul className="divide-y divide-haze/35">
+                {items.map((article) => (
+                  <ArticleRow
+                    key={article.id}
+                    article={article}
+                    read={readIds.has(article.id)}
+                    saved={laterIds.has(article.id)}
+                    prestored={prestoredIds.has(article.id)}
+                    onOpen={onOpen}
+                    revealed
+                    variant="row"
+                  />
+                ))}
+              </ul>
             </div>
-            <ul className={homeFeedLayout === 'cards'
-              ? 'grid grid-cols-1 items-start gap-2.5 px-3.5 py-1.5 min-[360px]:grid-cols-2 min-[430px]:gap-3 min-[430px]:px-4'
-              : 'divide-y divide-haze'}>
-              {items.map((article) => (
-                <ArticleRow
-                  key={article.id}
-                  article={article}
-                  read={readIds.has(article.id)}
-                  saved={laterIds.has(article.id)}
-                  prestored={prestoredIds.has(article.id)}
-                  onOpen={onOpen}
-                  revealed
-                  variant={homeFeedLayout === 'cards' ? 'compact-card' : 'row'}
-                />
-              ))}
-            </ul>
-          </div>
-        ))}
+          ))
+        )}
       </div>
     </div>
   )
@@ -199,6 +215,7 @@ export const FeedScreen = memo(function FeedScreen({
   prestoredIds = EMPTY_ARTICLE_IDS,
   showLead,
   homeFeedLayout = 'classic',
+  onHomeFeedLayoutChange,
   offline,
   categories,
   categoryId,
@@ -208,9 +225,11 @@ export const FeedScreen = memo(function FeedScreen({
   onSelectSource,
   favoriteSourceIds,
   onToggleFavoriteSource,
+  onRenameSource,
   onRemoveSource,
   onRemoveCategory,
   onRenameCategory,
+  onMoveCategory,
   articlesForCategory,
   translationPrefs,
   customSources,
@@ -221,12 +240,12 @@ export const FeedScreen = memo(function FeedScreen({
   onBrandTap,
   onOpenLocalSearch,
   pullRefreshSeq = 0,
-  searchTemplate,
-  frameworkCategories,
+  catalogSource,
+  resolvedTheme,
 }: Props) {
   const isDesktop = useIsDesktop()
   const reduced = useReducedMotion()
-  const isBrandedHome = title === '有所闻' && Boolean(onBrandTap)
+  const isBrandedHome = title === '有所闻'
   const useCompactCards = !isDesktop && homeFeedLayout === 'cards'
   const listRef = useRef<HTMLDivElement>(null)
   const pulseRef = useRef<HTMLSpanElement>(null)
@@ -239,101 +258,45 @@ export const FeedScreen = memo(function FeedScreen({
   const onLoadMoreRef = useRef(onLoadMore)
   onLoadMoreRef.current = onLoadMore
 
+  const { session: catalogSession, state: catalogState } = useCatalogSession(catalogSource)
   const [searchQuery, setSearchQuery] = useState('')
-  const [searching, setSearching] = useState(false)
-  const [searchResults, setSearchResults] = useState<Article[] | null>(null)
-  const [searchError, setSearchError] = useState<string | null>(null)
-
-  const handleSearch = useCallback(async () => {
-    if (!searchTemplate || !searchQuery.trim()) return
-    const url = searchTemplate.replace('{query}', encodeURIComponent(searchQuery.trim()))
-    setSearching(true)
-    setSearchError(null)
-    try {
-      const html = await fetchAbsoluteText(url)
-      const catalog = extractCatalog(html, url)
-      if (!catalog.items.length) {
-        setSearchResults([])
-        return
-      }
-      const dummySource: NewsSource = {
-        id: 'search_temp',
-        name: 'Search',
-        label: 'Search',
-        group: 'custom',
-        kind: 'web-catalog',
-        url,
-        enabled: true,
-      }
-      const results = catalogHtmlToArticles(dummySource, html, Date.now())
-      setSearchResults(results)
-    } catch (err) {
-      setSearchError(err instanceof Error ? err.message : '搜索失败')
-    } finally {
-      setSearching(false)
-    }
-  }, [searchTemplate, searchQuery])
-
-  const clearSearch = useCallback(() => {
-    setSearchQuery('')
-    setSearchResults(null)
-    setSearchError(null)
-  }, [])
-
+  const [catalogMode, setCatalogMode] = useState<'search' | 'category' | null>(null)
   const [activeFwCat, setActiveFwCat] = useState<number | null>(null)
-  const [fwCatArticles, setFwCatArticles] = useState<Article[] | null>(null)
-  const [fwCatLoading, setFwCatLoading] = useState(false)
-  const [fwCatPage, setFwCatPage] = useState(0)
-  const [fwCatExhausted, setFwCatExhausted] = useState(false)
-
-  const selectFwCategory = useCallback(async (idx: number | null) => {
+  const profile = catalogState.page?.profile ?? (catalogSource ? catalogProfileFor(catalogSource) : undefined)
+  const searchTemplate = Boolean(profile?.search)
+  const frameworkCategories = profile?.categories
+  const searching = catalogMode === 'search' && catalogState.loading
+  const searchResults = catalogMode === 'search' ? catalogState.history.flatMap((page) => page.articles).filter((article, index, all) => all.findIndex((item) => item.id === article.id) === index) : null
+  const searchError = catalogState.error ?? null
+  const fwCatArticles = catalogMode === 'category' ? catalogState.history.flatMap((page) => page.articles).filter((article, index, all) => all.findIndex((item) => item.id === article.id) === index) : null
+  const fwCatLoading = catalogMode === 'category' && catalogState.loading
+  const fwCatExhausted = catalogState.exhausted
+  useEffect(() => {
+    setCatalogMode(null)
+    setActiveFwCat(null)
+    setSearchQuery('')
+    if (catalogSource) void catalogSession?.open({ method: 'GET', url: catalogSource.url })
+  }, [catalogSession, catalogSource])
+  const handleSearch = useCallback(() => {
+    const request = profile && catalogSearchRequest(profile, searchQuery.trim())
+    if (!request || !searchQuery.trim()) return
+    setCatalogMode('search')
+    setActiveFwCat(null)
+    void catalogSession?.open(request)
+  }, [profile, searchQuery, catalogSession])
+  const clearSearch = useCallback(() => {
+    catalogSession?.cancel()
+    setSearchQuery('')
+    setCatalogMode(null)
+    if (catalogSource) void catalogSession?.open({ method: 'GET', url: catalogSource.url })
+  }, [catalogSession, catalogSource])
+  const selectFwCategory = useCallback((idx: number | null) => {
     setActiveFwCat(idx)
-    setFwCatPage(0)
-    setFwCatExhausted(false)
-    if (idx === null || !frameworkCategories?.[idx]) {
-      setFwCatArticles(null)
-      return
-    }
-    const catUrl = frameworkCategories[idx].url
-    setFwCatLoading(true)
-    try {
-      const html = await fetchAbsoluteText(catUrl)
-      const results = catalogHtmlToArticles(
-        { id: 'fw_cat', name: '', label: '', group: 'custom', kind: 'web-catalog', url: catUrl, enabled: true },
-        html, Date.now(),
-      )
-      setFwCatArticles(results)
-    } catch {
-      setFwCatArticles([])
-    } finally {
-      setFwCatLoading(false)
-    }
-  }, [frameworkCategories])
-
-  const loadMoreFwCat = useCallback(async () => {
-    if (fwCatLoading || fwCatExhausted || activeFwCat === null || !frameworkCategories?.[activeFwCat]) return
-    const catUrl = frameworkCategories[activeFwCat].url
-    const nextPage = fwCatPage + 1
-    const pageUrl = catUrl.replace(/\.html$/i, '') + `/page/${nextPage + 1}.html`
-    setFwCatLoading(true)
-    try {
-      const html = await fetchAbsoluteText(pageUrl)
-      const results = catalogHtmlToArticles(
-        { id: 'fw_cat', name: '', label: '', group: 'custom', kind: 'web-catalog', url: pageUrl, enabled: true },
-        html, Date.now(),
-      )
-      if (!results.length) {
-        setFwCatExhausted(true)
-      } else {
-        setFwCatArticles((prev) => [...(prev ?? []), ...results])
-        setFwCatPage(nextPage)
-      }
-    } catch {
-      setFwCatExhausted(true)
-    } finally {
-      setFwCatLoading(false)
-    }
-  }, [activeFwCat, frameworkCategories, fwCatPage, fwCatLoading, fwCatExhausted])
+    setCatalogMode(idx === null ? null : 'category')
+    const url = idx === null ? catalogSource?.url : frameworkCategories?.[idx]?.url
+    if (url) void catalogSession?.open({ method: 'GET', url })
+  }, [frameworkCategories, catalogSession, catalogSource?.url])
+  const loadMoreFwCat = useCallback(() => { void catalogSession?.next() }, [catalogSession])
 
   const loadingMoreRef = useRef(loadingMore)
   loadingMoreRef.current = loadingMore
@@ -355,6 +318,7 @@ export const FeedScreen = memo(function FeedScreen({
     usePullToRefresh({
       onRefresh,
       reduced,
+      surfaceRef: listRef,
     })
   const lastPullRefreshSeq = useRef(pullRefreshSeq)
 
@@ -573,7 +537,7 @@ export const FeedScreen = memo(function FeedScreen({
       )}
 
       {searchError && (
-        <p className="page-x lg:px-6 xl:px-8 2xl:px-10 py-2 text-[12px] text-red-400">{searchError}</p>
+        <p className="page-x lg:px-6 xl:px-8 2xl:px-10 py-2 text-[12px] text-red-400">{searchError}<button type="button" className="ml-3 text-cinnabar" onClick={() => void catalogSession?.retry()}>重试</button></p>
       )}
 
       {frameworkCategories && frameworkCategories.length > 0 && (
@@ -633,6 +597,8 @@ export const FeedScreen = memo(function FeedScreen({
               />
             ))}
           </ul>
+          {!catalogState.exhausted && searchResults.length > 0 && <button type="button" disabled={searching} onClick={() => void catalogSession?.next()} className="my-4 rounded-xl border border-haze px-4 py-2 text-[12px] text-paper-muted">加载更多</button>}
+          {!searching && !searchError && !searchResults.length && <p className="py-6 text-center text-[13px] text-paper-muted">未找到相关内容</p>}
         </div>
       ) : fwCatArticles !== null ? (
         <div className="page-x lg:px-6 xl:px-8 2xl:px-10">
@@ -701,57 +667,97 @@ export const FeedScreen = memo(function FeedScreen({
             </div>
           )}
 
-          {grouped.map(([bucket, items]) => (
-            <div key={bucket}>
-              <div className={useCompactCards
-                ? 'flex items-center gap-2.5 px-3.5 pt-4 pb-1.5 min-[430px]:px-4'
-                : 'page-x flex items-center gap-2.5 pt-4 pb-1.5 lg:px-6 xl:px-8 2xl:px-10'}>
-                <span className={useCompactCards
-                  ? 'font-display text-[13px] font-medium tracking-[0.08em] text-paper-muted'
-                  : 'font-mono text-[11px] font-medium tracking-[0.16em] text-paper-muted'}>{bucket}</span>
-                <span className="h-px flex-1 bg-haze" aria-hidden />
+          {useCompactCards ? (
+            /* 手机双列卡片：连续优雅杂志流，卡片自然并排排满，左右严整对齐，杜绝被日期硬切碎导致的空洞与横竖混杂 */
+            <ul className="grid grid-cols-1 items-start gap-2.5 px-3.5 py-2.5 min-[360px]:grid-cols-2 min-[430px]:gap-3 min-[430px]:px-4">
+              {rest.map((article) => (
+                <ArticleRow
+                  key={article.id}
+                  article={article}
+                  read={readIds.has(article.id)}
+                  saved={laterIds.has(article.id)}
+                  prestored={prestoredIds.has(article.id)}
+                  translated={translations.get(article.id)}
+                  displayMode={activeTranslationPrefs.displayMode}
+                  onOpen={onOpen}
+                  onSourceClick={onSelectSource}
+                  variant="compact-card"
+                />
+              ))}
+            </ul>
+          ) : !isDesktop ? (
+            /* 移动端经典单列时间线：按今天/昨天/更早分组 */
+            grouped.map(([bucket, items]) => (
+              <div key={bucket}>
+                <div className="page-x flex items-center gap-2.5 pt-5 pb-2 lg:px-6 xl:px-8 2xl:px-10">
+                  <span className="font-mono text-[11px] font-medium tracking-[0.18em] text-paper-muted/90">{bucket}</span>
+                  <span className="h-px w-8 bg-gradient-to-r from-haze/80 to-transparent" aria-hidden />
+                </div>
+                <ul className="divide-y divide-haze/35">
+                  {items.map((article) => (
+                    <ArticleRow
+                      key={article.id}
+                      article={article}
+                      read={readIds.has(article.id)}
+                      saved={laterIds.has(article.id)}
+                      prestored={prestoredIds.has(article.id)}
+                      translated={translations.get(article.id)}
+                      displayMode={activeTranslationPrefs.displayMode}
+                      onOpen={onOpen}
+                      onSourceClick={onSelectSource}
+                      variant="row"
+                    />
+                  ))}
+                </ul>
               </div>
-
-              {/* 新版手机双栏与经典单栏都保留；桌面继续规则网格。 */}
-              {!isDesktop ? (
-                <ul className={useCompactCards
-                  ? 'grid grid-cols-1 items-start gap-2.5 px-3.5 py-1.5 min-[360px]:grid-cols-2 min-[430px]:gap-3 min-[430px]:px-4'
-                  : 'divide-y divide-haze'}>
-                  {items.map((article) => (
-                    <ArticleRow
-                      key={article.id}
-                      article={article}
-                      read={readIds.has(article.id)}
-                      saved={laterIds.has(article.id)}
-                      prestored={prestoredIds.has(article.id)}
-                      translated={translations.get(article.id)}
-                      displayMode={activeTranslationPrefs.displayMode}
-                      onOpen={onOpen}
-                      onSourceClick={onSelectSource}
-                      variant={useCompactCards ? 'compact-card' : 'row'}
-                    />
-                  ))}
-                </ul>
-              ) : (
-                <ul className="grid grid-cols-2 gap-4 px-6 py-2 xl:grid-cols-3 2xl:grid-cols-4 min-[2100px]:grid-cols-5 xl:px-8 2xl:px-10 min-[2100px]:gap-5">
-                  {items.map((article) => (
-                    <ArticleRow
-                      key={article.id}
-                      article={article}
-                      read={readIds.has(article.id)}
-                      saved={laterIds.has(article.id)}
-                      prestored={prestoredIds.has(article.id)}
-                      translated={translations.get(article.id)}
-                      displayMode={activeTranslationPrefs.displayMode}
-                      onOpen={onOpen}
-                      onSourceClick={onSelectSource}
-                      variant="card"
-                    />
-                  ))}
-                </ul>
-              )}
+            ))
+          ) : homeFeedLayout === 'classic' ? (
+            /* 桌面端经典单列时间线：居中舒适宽度，保持与移动端一致的经典阅读节奏 */
+            <div className="mx-auto w-full max-w-4xl px-4 py-2">
+              {grouped.map(([bucket, items]) => (
+                <div key={bucket}>
+                  <div className="flex items-center gap-2.5 pt-5 pb-2">
+                    <span className="font-mono text-[11px] font-medium tracking-[0.18em] text-paper-muted/90">{bucket}</span>
+                    <span className="h-px w-8 bg-gradient-to-r from-haze/80 to-transparent" aria-hidden />
+                  </div>
+                  <ul className="divide-y divide-haze/35">
+                    {items.map((article) => (
+                      <ArticleRow
+                        key={article.id}
+                        article={article}
+                        read={readIds.has(article.id)}
+                        saved={laterIds.has(article.id)}
+                        prestored={prestoredIds.has(article.id)}
+                        translated={translations.get(article.id)}
+                        displayMode={activeTranslationPrefs.displayMode}
+                        onOpen={onOpen}
+                        onSourceClick={onSelectSource}
+                        variant="row"
+                      />
+                    ))}
+                  </ul>
+                </div>
+              ))}
             </div>
-          ))}
+          ) : (
+            /* 桌面端规则多列网格：双栏/多栏卡片杂志流 */
+            <ul className="grid grid-cols-2 gap-4 px-6 py-4 xl:grid-cols-3 2xl:grid-cols-4 min-[2100px]:grid-cols-5 xl:px-8 2xl:px-10 min-[2100px]:gap-5">
+              {rest.map((article) => (
+                <ArticleRow
+                  key={article.id}
+                  article={article}
+                  read={readIds.has(article.id)}
+                  saved={laterIds.has(article.id)}
+                  prestored={prestoredIds.has(article.id)}
+                  translated={translations.get(article.id)}
+                  displayMode={activeTranslationPrefs.displayMode}
+                  onOpen={onOpen}
+                  onSourceClick={onSelectSource}
+                  variant="card"
+                />
+              ))}
+            </ul>
+          )}
         </>
       )}
 
@@ -831,7 +837,7 @@ export const FeedScreen = memo(function FeedScreen({
 
   return (
     <section className="relative flex min-h-0 flex-1 flex-col">
-      <header className="relative z-20 shrink-0 bg-ink/92 pt-1.5 pb-1 backdrop-blur-xl border-b border-haze/40">
+      <header className="relative z-20 shrink-0 bg-ink/90 pt-2 pb-1.5 backdrop-blur-xl border-b border-haze/30">
         <div className="page-x lg:px-6 xl:px-8 2xl:px-10 max-w-[2400px] mx-auto flex items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2">
             {onBack && (
@@ -839,34 +845,62 @@ export const FeedScreen = memo(function FeedScreen({
                 <ChevronLeft size={18} strokeWidth={1.5} className="text-paper-muted" />
               </button>
             )}
-            {title === '有所闻' && onBrandTap ? (
-              <button
-                type="button"
-                onClick={onBrandTap}
-                className={`shrink-0 font-display text-paper ${
-                  useCompactCards
-                    ? 'text-[23px] leading-none tracking-[0.015em]'
-                    : 'text-[18px] leading-tight'
-                } md:text-[20px] lg:text-[22px]`}
-              >
-                {title}
-              </button>
+            {isBrandedHome ? (
+              <div className="flex min-w-0 items-center gap-2.5">
+                {onBrandTap ? (
+                  <button
+                    type="button"
+                    onClick={onBrandTap}
+                    aria-label="有所闻 - 返回顶部"
+                    className="group flex min-w-0 items-end gap-1.5 py-1 transition-opacity hover:opacity-85 active:scale-[0.99] focus:outline-hidden"
+                  >
+                    <BrandLogo
+                      resolvedTheme={resolvedTheme}
+                      tight
+                      size={18}
+                      className="h-[18px] w-auto shrink-0 transition-transform duration-200 group-hover:scale-105 active:scale-95"
+                    />
+                    <span className="truncate font-display text-[13px] sm:text-[13.5px] font-normal tracking-[0.03em] text-paper-muted group-hover:text-paper transition-colors leading-none pb-[1px]">
+                      更大的世界，更好的判断
+                    </span>
+                    <span className="sr-only">有所闻</span>
+                  </button>
+                ) : (
+                  <div className="flex min-w-0 items-end gap-1.5 py-1">
+                    <BrandLogo
+                      resolvedTheme={resolvedTheme}
+                      tight
+                      size={18}
+                      className="h-[18px] w-auto shrink-0"
+                    />
+                    <span className="truncate font-display text-[13px] sm:text-[13.5px] font-normal tracking-[0.03em] text-paper-muted leading-none pb-[1px]">
+                      更大的世界，更好的判断
+                    </span>
+                    <span className="sr-only">有所闻</span>
+                  </div>
+                )}
+                <div className="hidden lg:flex items-center gap-2.5 pl-2.5 border-l border-haze/60">
+                  <p className="min-w-0 truncate font-mono text-[11px] lg:text-[11.5px] tracking-[0.12em] text-paper-faint">
+                    {activeCategory?.caption || caption}
+                  </p>
+                  <span className="inline-flex items-center px-1.5 py-0.5 rounded-full border border-haze/80 bg-ink-raised/60 text-[9.5px] lg:text-[10px] font-mono text-paper-faint">
+                    {articles.length} 篇
+                  </span>
+                </div>
+              </div>
             ) : (
-              <h1 className="shrink-0 font-display text-[18px] leading-tight text-paper md:text-[20px] lg:text-[22px]">
-                {title}
-              </h1>
+              <div className="flex min-w-0 items-center gap-2">
+                <h1 className="shrink-0 font-display text-[19px] sm:text-[20px] leading-tight text-paper md:text-[20px] lg:text-[22px]">
+                  {title}
+                </h1>
+                <p className="hidden md:inline-block min-w-0 truncate font-mono text-[11px] lg:text-[11.5px] tracking-[0.12em] text-paper-faint">
+                  {activeCategory?.caption || caption}
+                </p>
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded-full border border-haze/80 bg-ink-raised/60 text-[9.5px] lg:text-[10px] font-mono text-paper-faint">
+                  {articles.length} 篇
+                </span>
+              </div>
             )}
-            {isBrandedHome && useCompactCards && (
-              <span className="hidden min-[390px]:inline-block max-w-[9.5rem] truncate font-mono text-[9px] tracking-[0.08em] text-paper-faint md:hidden">
-                更大的世界，更好的判断
-              </span>
-            )}
-            <p className="hidden md:inline-block min-w-0 truncate font-mono text-[11px] lg:text-[11.5px] tracking-[0.12em] text-paper-faint">
-              {activeCategory?.caption || caption}
-            </p>
-            <span className={`${isBrandedHome ? 'hidden lg:inline-flex' : 'inline-flex'} items-center px-1.5 py-0.5 rounded-full border border-haze/80 bg-ink-raised/60 text-[9.5px] lg:text-[10px] font-mono text-paper-faint`}>
-              {articles.length} 篇
-            </span>
           </div>
 
           <div className="flex shrink-0 items-center gap-2">
@@ -874,14 +908,21 @@ export const FeedScreen = memo(function FeedScreen({
               {lastUpdated ? `更新于 ${relativeTime(lastUpdated)}` : ''}
             </span>
 
+            {onHomeFeedLayoutChange && (
+              <FeedLayoutSwitcher
+                layout={homeFeedLayout}
+                onChange={onHomeFeedLayoutChange}
+              />
+            )}
+
             {onOpenLocalSearch && (
               <button
                 type="button"
                 onClick={onOpenLocalSearch}
                 aria-label="本地搜索已缓存内容"
-                className="flex h-7.5 w-7.5 lg:h-8 lg:w-8 shrink-0 items-center justify-center rounded-lg border border-transparent lg:border-haze/70 lg:bg-ink-raised/50 lg:hover:bg-ink-raised lg:hover:border-paper-faint/30 transition-all text-paper-muted hover:text-paper"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-transparent hover:border-haze/60 hover:bg-ink-raised/50 lg:rounded-lg lg:border-haze/70 lg:bg-ink-raised/50 lg:hover:bg-ink-raised lg:hover:border-paper-faint/30 transition-all text-paper-muted hover:text-paper active:scale-95"
               >
-                <Search size={14} strokeWidth={1.6} />
+                <Search size={16} strokeWidth={1.7} />
               </button>
             )}
 
@@ -889,13 +930,13 @@ export const FeedScreen = memo(function FeedScreen({
               type="button"
               onClick={() => void onRefresh()}
               aria-label="刷新"
-              className={`relative h-7.5 w-7.5 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-transparent text-paper-muted transition-all hover:text-paper active:scale-95 lg:h-8 lg:w-auto lg:border-haze/70 lg:bg-ink-raised/50 lg:px-2.5 lg:hover:border-paper-faint/30 lg:hover:bg-ink-raised ${
-                isBrandedHome && !useCompactCards ? 'hidden lg:flex' : 'flex'
+              className={`relative h-8 w-8 shrink-0 items-center justify-center gap-1.5 rounded-full border border-transparent hover:border-haze/60 hover:bg-ink-raised/50 text-paper-muted transition-all hover:text-paper active:scale-95 lg:h-8 lg:w-auto lg:rounded-lg lg:border-haze/70 lg:bg-ink-raised/50 lg:px-2.5 lg:hover:border-paper-faint/30 lg:hover:bg-ink-raised ${
+                isBrandedHome ? 'hidden lg:flex' : 'flex'
               }`}
             >
               <RotateCw
-                size={14}
-                strokeWidth={1.6}
+                size={15.5}
+                strokeWidth={1.7}
                 className={`text-paper-muted ${refreshing ? 'animate-spin text-cinnabar' : ''}`}
               />
               <span className="hidden lg:inline font-mono text-[11px] text-paper-muted">
@@ -911,7 +952,7 @@ export const FeedScreen = memo(function FeedScreen({
         </div>
 
         {categoryId && categories && categories.length > 0 && onCategoryChange && (
-          <div className="mt-0.5 lg:hidden" data-tour="category-rail">
+          <div className="mt-1 lg:hidden" data-tour="category-rail">
             <CategoryRail
               categories={categories}
               activeId={categoryId}
@@ -922,12 +963,13 @@ export const FeedScreen = memo(function FeedScreen({
               reduced={reduced}
               onRemoveCategory={onRemoveCategory}
               onRenameCategory={onRenameCategory}
+              onMoveCategory={onMoveCategory}
             />
           </div>
         )}
 
         {availableSources && availableSources.length > 0 && onSelectSource && (
-          <div className="mt-0.5 lg:mt-1.5">
+          <div className="mt-1 lg:mt-1.5">
             <SourceFilterChips
               sources={availableSources}
               selectedSourceId={selectedSourceId ?? null}
@@ -935,6 +977,7 @@ export const FeedScreen = memo(function FeedScreen({
               counts={sourceCounts}
               favoriteSourceIds={favoriteSourceIds}
               onToggleFavorite={onToggleFavoriteSource}
+              onRenameSource={onRenameSource}
               onRemoveSource={onRemoveSource}
             />
           </div>

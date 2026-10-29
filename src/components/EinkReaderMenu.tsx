@@ -1,6 +1,7 @@
 import { BookmarkCheck, BookmarkPlus, Languages, List, Settings2, Share2, Type, X } from 'lucide-react'
 
 import { FONT_SCALE_OPTIONS } from '../sources/preferences'
+import type { ReaderTranslationMode } from './ReaderTranslationMenu'
 
 interface Props {
   open: boolean
@@ -10,6 +11,7 @@ interface Props {
   saved: boolean
   translating: boolean
   showTranslation: boolean
+  translationMode?: ReaderTranslationMode
   onClose: () => void
   onFontScale: (next: number) => void
   onJumpPage: (index: number) => void
@@ -40,6 +42,7 @@ export function EinkReaderMenu({
   saved,
   translating,
   showTranslation,
+  translationMode,
   onClose,
   onFontScale,
   onJumpPage,
@@ -54,6 +57,16 @@ export function EinkReaderMenu({
   const scaleLabel =
     FONT_SCALE_OPTIONS.find((o) => Math.abs(o.value - fontScale) < 0.001)?.label ?? '自定义'
   const safeCount = Math.max(pageCount, 1)
+
+  const translationLabel = translating
+    ? '翻译中'
+    : translationMode === 'compare'
+      ? '双语'
+      : translationMode === 'replace'
+        ? '译文'
+        : showTranslation
+          ? '原文'
+          : '翻译'
 
   return (
     <div className="absolute inset-0 z-40 flex flex-col justify-end" data-no-page-tap>
@@ -152,7 +165,7 @@ export function EinkReaderMenu({
                 className={showTranslation ? 'text-cinnabar' : 'text-paper-muted'}
               />
               <span className="font-mono text-[11px] text-paper">
-                {showTranslation ? '原文' : '翻译'}
+                {translationLabel}
               </span>
             </button>
             <button
