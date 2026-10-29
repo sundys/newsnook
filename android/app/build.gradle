@@ -50,7 +50,7 @@ android {
     compileSdk = rootProject.ext.compileSdkVersion
     // MainActivity / NewsNookApplication gate diagnostics on BuildConfig.STARTUP_BENCHMARK.
     buildFeatures {
-        buildConfig true
+        buildConfig = true
     }
     flavorDimensions += "translation"
     productFlavors {
@@ -131,7 +131,7 @@ android {
             initWith release
             buildConfigField 'boolean', 'STARTUP_BENCHMARK', 'true'
             applicationIdSuffix '.benchmark'
-            signingConfig signingConfigs.debug
+            signingConfig = signingConfigs.debug
             matchingFallbacks = ['release']
         }
         nonMinifiedRelease {
@@ -140,7 +140,7 @@ android {
             shrinkResources = false
             buildConfigField 'boolean', 'STARTUP_BENCHMARK', 'true'
             applicationIdSuffix '.benchmark'
-            signingConfig signingConfigs.debug
+            signingConfig = signingConfigs.debug
             matchingFallbacks = ['release']
         }
     }
@@ -154,9 +154,9 @@ android {
 // Keep routine GitHub/CLI releases deterministic: the generated profile is
 // checked into src/main/generated/baselineProfiles; generation is explicit.
 baselineProfile {
-    mergeIntoMain true
-    saveInSrc true
-    automaticGenerationDuringBuild false
+    mergeIntoMain = true
+    saveInSrc = true
+    automaticGenerationDuringBuild = false
 }
 
 // cloud flavor 不需要原生引擎；禁用其 CMake/Ninja 任务以免空跑。
@@ -190,11 +190,8 @@ tasks.register('applyUpdateDelta', JavaExec) {
     }
 }
 
-repositories {
-    flatDir{
-        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
-    }
-}
+// Fork lock: no local AAR/JAR is checked in under app/libs, so flatDir is not
+// declared here (Capacitor re-adds it only when a plugin actually ships one).
 
 dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')

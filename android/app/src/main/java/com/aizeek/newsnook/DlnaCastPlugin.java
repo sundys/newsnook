@@ -70,6 +70,9 @@ import org.w3c.dom.NodeList;
         )
     }
 )
+// 兼容 minSdk 24 的旧平台 API（状态栏着色、SYSTEM_UI_FLAG_*、MediaSession 旧标志等）。
+// 逐项替换属于行为变更，这里只抑制编译期提示，不影响运行。
+@SuppressWarnings({"deprecation", "unchecked"})
 public class DlnaCastPlugin extends Plugin {
 
     private static final String SSDP_ADDRESS = "239.255.255.250";

@@ -30,6 +30,9 @@ import com.getcapacitor.PluginHandle;
 import com.getcapacitor.WebViewListener;
 import java.util.Locale;
 
+// 兼容 minSdk 24 的旧平台 API（状态栏着色、SYSTEM_UI_FLAG_*、MediaSession 旧标志等）。
+// 逐项替换属于行为变更，这里只抑制编译期提示，不影响运行。
+@SuppressWarnings({"deprecation", "unchecked"})
 public class MainActivity extends BridgeActivity implements BrowserFullscreenHost {
 
     private static final String STARTUP_TRACE = "NewsNookStartup";

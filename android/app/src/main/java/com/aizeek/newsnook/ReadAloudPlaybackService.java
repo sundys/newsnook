@@ -41,6 +41,9 @@ import java.util.concurrent.CopyOnWriteArraySet;
  * onRangeStart character offset; resume synthesizes the remaining suffix. The JS domain service
  * still owns the article queue while this service owns the currently spoken segment.
  */
+// 兼容 minSdk 24 的旧平台 API（状态栏着色、SYSTEM_UI_FLAG_*、MediaSession 旧标志等）。
+// 逐项替换属于行为变更，这里只抑制编译期提示，不影响运行。
+@SuppressWarnings({"deprecation", "unchecked"})
 public final class ReadAloudPlaybackService extends Service {
 
     static final String ACTION_SPEAK = "com.aizeek.newsnook.readaloud.SPEAK";

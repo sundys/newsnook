@@ -49,6 +49,9 @@ import org.json.JSONTokener;
  * are deleted on eviction, image-mode close or navigation; crash leftovers
  * are cleared at the next browser image session startup.
  */
+// 兼容 minSdk 24 的旧平台 API（状态栏着色、SYSTEM_UI_FLAG_*、MediaSession 旧标志等）。
+// 逐项替换属于行为变更，这里只抑制编译期提示，不影响运行。
+@SuppressWarnings({"deprecation", "unchecked"})
 final class BrowserImageCapture {
     static final int MAX_IMAGES = 240;
     // Upstream bytes are spooled to private cache, never Base64-transferred as a preview.

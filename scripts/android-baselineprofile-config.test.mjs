@@ -21,10 +21,10 @@ for (const variant of ['benchmarkRelease', 'nonMinifiedRelease']) {
   const variantManifest = source(`android/app/src/${variant}/AndroidManifest.xml`)
   assert.match(variantManifest, /<profileable\s+android:shell=['"]true['"]\s*\/>/, `${variant} must remain profileable by shell`)
 }
-assert.match(app, /automaticGenerationDuringBuild\s+false/, 'Normal release CI cannot depend on a connected emulator')
-assert.match(app, /mergeIntoMain\s+true/, 'Shared startup paths should cover cloud and local releases')
-assert.match(app, /benchmarkRelease\s*\{[^}]*signingConfig\s+signingConfigs.debug/s, 'Benchmark variant must not require a production signing key')
-assert.match(app, /nonMinifiedRelease\s*\{[^}]*signingConfig\s+signingConfigs.debug/s, 'Profile producer must be installable without a production signing key')
+assert.match(app, /automaticGenerationDuringBuild\s*=?\s*false/, 'Normal release CI cannot depend on a connected emulator')
+assert.match(app, /mergeIntoMain\s*=?\s*true/, 'Shared startup paths should cover cloud and local releases')
+assert.match(app, /benchmarkRelease\s*\{[^}]*signingConfig\s*=?\s*signingConfigs.debug/s, 'Benchmark variant must not require a production signing key')
+assert.match(app, /nonMinifiedRelease\s*\{[^}]*signingConfig\s*=?\s*signingConfigs.debug/s, 'Profile producer must be installable without a production signing key')
 for (const variant of ['benchmarkRelease', 'nonMinifiedRelease']) {
   assert.match(app, new RegExp(`${variant}\\s*\\{\\s*initWith\\s+release`, 's'), `${variant} must explicitly inherit the production release configuration`)
   assert.match(app, new RegExp(`${variant}\\s*\\{[^}]*applicationIdSuffix\\s+['"]\\.benchmark['"]`, 's'), `${variant} must not overwrite the installed production APK`)
@@ -41,7 +41,7 @@ assert.match(projectRules, /^-keep\s+@interface\s+com\.getcapacitor\.NativePlugi
 const mod = 'android/baselineprofile'
 assert.ok(existsSync(join(root, mod, 'build.gradle')), 'Baseline Profile module needs its own Gradle file')
 const moduleBuild = source(`${mod}/build.gradle`)
-assert.match(moduleBuild, /namespace ['"]com\.aizeek\.newsnook\.profiletests['"]/, 'Test APK namespace must differ from the isolated target package')
+assert.match(moduleBuild, /namespace\s*=?\s*['"]com\.aizeek\.newsnook\.profiletests['"]/, 'Test APK namespace must differ from the isolated target package')
 const generator = source(`${mod}/src/main/java/com/aizeek/newsnook/benchmark/BaselineProfileGenerator.kt`)
 const bench = source(`${mod}/src/main/java/com/aizeek/newsnook/benchmark/StartupBenchmark.kt`)
 assert.match(generator, /BaselineProfileRule/)

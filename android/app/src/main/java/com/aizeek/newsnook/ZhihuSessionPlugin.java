@@ -53,6 +53,9 @@ import org.json.JSONObject;
  * AndroidKeyStore AES-GCM 边界持久化。插件本身不写 localStorage/SharedPreferences。
  */
 @CapacitorPlugin(name = "ZhihuSession")
+// 兼容 minSdk 24 的旧平台 API（状态栏着色、SYSTEM_UI_FLAG_*、MediaSession 旧标志等）。
+// 逐项替换属于行为变更，这里只抑制编译期提示，不影响运行。
+@SuppressWarnings({"deprecation", "unchecked"})
 public class ZhihuSessionPlugin extends Plugin {
 
     private static final String SIGN_IN_URL = "https://www.zhihu.com/signin?next=%2F";
