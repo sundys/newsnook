@@ -209,11 +209,10 @@ dependencies {
     implementation "androidx.browser:browser:1.8.0"
     implementation "com.squareup.okhttp3:okhttp:$okhttpVersion"
     implementation project(':capacitor-android')
-    // 设备上仅执行 GDIFF patch；生成器依赖的 Trove 不应进入任何 APK。
-    implementation('com.nothome:javaxdelta:2.0.1') {
-        exclude group: 'trove', module: 'trove'
-    }
-    testImplementation 'trove:trove:1.0.2'
+    // Fork lock: the fork ships GitHub Release full-APK updates only, so the
+    // upstream GDIFF runtime is not packaged into the APK. The separate
+    // updateDeltaTool configuration keeps scripts/android-delta-release.mjs usable
+    // without putting javaxdelta on the app runtime classpath.
     updateDeltaTool 'com.nothome:javaxdelta:2.0.1'
     localImplementation 'com.google.mlkit:translate:17.0.3'
     testImplementation "junit:junit:$junitVersion"
