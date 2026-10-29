@@ -23,3 +23,47 @@ src/features/appUpdate/types.ts merge=ours
 src/features/appUpdate/useAppUpdate.ts merge=ours
 src/features/oss/licenses.ts merge=ours
 src/screens/settings/AboutScreen.tsx merge=ours
+
+# 换行：与上游一致，入库与检出统一 LF。
+# 本机若开 core.autocrlf=true，工作区会被检出成 CRLF，读源码做正则断言的脚本
+# （scripts/android-startup*.test.mjs 等）会匹配失败；上面的 merge=ours 又让上游的
+# 换行规则进不来，所以这里必须自带一份。改完执行 `git add --renormalize .`。
+* text=auto eol=lf
+
+# Unix / shell 入口：必须 LF
+*.sh text eol=lf
+*.bash text eol=lf
+android/gradlew text eol=lf
+cloud/deploy text eol=lf
+
+# Windows 批处理：cmd.exe 需要 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制：禁止换行转换
+*.png binary -eol
+*.jpg binary -eol
+*.jpeg binary -eol
+*.gif binary -eol
+*.webp binary -eol
+*.ico binary -eol
+*.jar binary -eol
+*.aar binary -eol
+*.apk binary -eol
+*.so binary -eol
+*.dll binary -eol
+*.wasm binary -eol
+*.woff binary -eol
+*.woff2 binary -eol
+*.ttf binary -eol
+*.otf binary -eol
+*.eot binary -eol
+*.zip binary -eol
+*.gz binary -eol
+*.tgz binary -eol
+*.7z binary -eol
+*.pdf binary -eol
+*.mp4 binary -eol
+*.webm binary -eol
+*.keystore binary -eol
+*.jks binary -eol
