@@ -29,6 +29,13 @@ export function useLaterArticles(notifyCacheChange: () => void) {
     void haptics.success()
   }, [notifyCacheChange])
 
+  /** 同步下来的稍后读整包替换：不再逐条 pin，交给 App 的核对流程统一处理 */
+  const replaceFromSync = useCallback((next: Article[]) => {
+    laterRef.current = next
+    setLater(next)
+    notifyCacheChange()
+  }, [notifyCacheChange])
+
   const removeLater = useCallback((id: string) => {
     const next = laterRef.current.filter((item) => item.id !== id)
     laterRef.current = next
@@ -38,5 +45,5 @@ export function useLaterArticles(notifyCacheChange: () => void) {
     notifyCacheChange()
   }, [notifyCacheChange])
 
-  return { later, laterRef, toggleLater, removeLater }
+  return { later, laterRef, toggleLater, removeLater, replaceFromSync }
 }

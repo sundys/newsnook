@@ -142,6 +142,7 @@
     "test:device-identity": "npx tsx scripts/device-identity.test.ts",
     "test:account-sync-ui": "npm run build:contracts && npx tsx scripts/account-sync-ui.test.ts",
     "test:sync-notifier": "npm run build:contracts && npx tsx scripts/sync-notifier.test.ts",
+    "test:webdav-sync": "npx tsx scripts/webdav-sync.test.ts",
     "test:wiki": "tsx scripts/wiki-selection-ui.test.tsx && tsx scripts/wiki-encyclopedia.test.ts && tsx scripts/wiki-library.test.ts && tsx scripts/wiki-baidu.test.ts && tsx scripts/wiki-baidu-browser.test.ts && tsx scripts/wiki-baidu-probe.test.ts",
     "test:pull-to-refresh": "node --import tsx scripts/pull-to-refresh.test.ts && node --import tsx scripts/pull-to-refresh-gesture.test.tsx",
     "test:scroll-lifecycle": "node --import tsx scripts/scroll-lifecycle.test.tsx",

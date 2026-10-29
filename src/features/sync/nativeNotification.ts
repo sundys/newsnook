@@ -58,11 +58,15 @@ const SYNC_ROUTE_PREFIX = 'newsnook://sync/'
 /**
  * 通知深链 → 落地页。旧 WebView 对非特殊 scheme 的 `new URL()` 解析不稳，
  * 与 `lib/appDeepLink` 一样手工剥前缀。不是同步通知时返回 null。
+ *
+ * `webdav-sync` 与 `account-sync` 共用同一个原生插件，落地页由这里决定。
  */
-export function syncRouteFromAppUrl(url: string): 'account-sync' | null {
+export type SyncRoute = 'account-sync' | 'webdav-sync'
+
+export function syncRouteFromAppUrl(url: string): SyncRoute | null {
   if (!url.toLowerCase().startsWith(SYNC_ROUTE_PREFIX)) return null
   const route = url.slice(SYNC_ROUTE_PREFIX.length).split(/[?#]/)[0]
-  return route === 'account-sync' ? 'account-sync' : null
+  return route === 'account-sync' || route === 'webdav-sync' ? route : null
 }
 
 /** 引擎事件 → 通知栏；返回是否真的发了通知 */

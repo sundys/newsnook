@@ -75,10 +75,11 @@ newsnook/
 | RSS 订阅商店 / 在线发现 | `features/feedDiscovery/onlineSearch.ts` · `siteDiscovery.ts` · `preview.ts` · `screens/settings/FeedStoreScreen.tsx`；只在线检索少量命中地址，不打包或缓存全量 RSS 目录。订阅与缓存阅读继续本地优先；说明见 `docs/rss-subscription-store.md` |
 | 分类 / 场景预设 | `sources/categories.ts` · `presets.ts` · `hooks/usePresets.ts` |
 | 列表拉取与缓存 | `hooks/useFeeds.ts` · `lib/http.ts` · `lib/storage.ts` |
-| 配置备份与恢复 | `lib/backup.ts` · `components/BackupPanel.tsx`（入口在 `screens/settings/StorageScreen.tsx`）；与云同步并存，本地文件备份不依赖账号 |
-| 账户（登录 / Session / SecureStore） | `features/account/`：`authClient.ts`（Better Auth HTTP + Web Cookie / Android Bearer） · `useAccount.ts` · `secureStore.ts` + `secretStore.ts`（Keystore 与 Secret 水合） · `mobileCallback.ts`（`newsnook://auth/callback`） · `screenModel.ts`（页面状态机） |
-| 云同步（客户端） | `features/sync/`：`projection.ts`（本地态 → 同步实体） · `reconcile.ts`（影子对账 + Outbox） · `SyncEngine.ts`（push/pull/apply/退避） · `merge.ts` · `runtimeAdapter.ts` + `useCloudSync.ts`（接 React） · `notifier.ts`（Toast / 通知分寸） · `firstSync.ts` · `devices.ts` |
-| 云同步（服务端与协议） | `cloud/`（Fastify + PostgreSQL + Better Auth；push 用 `sync_heads ... FOR UPDATE` 行锁串行化） · `packages/contracts/`（zod schema；`./protocol` 子路径供客户端免 zod 引用）；部署见 [`docs/cloud-deploy.md`](./docs/cloud-deploy.md)，规格见 [`docs/superpowers/specs/2026-08-27-account-cloud-sync-design.md`](./docs/superpowers/specs/2026-08-27-account-cloud-sync-design.md) |
+| 配置备份与恢复 | `lib/backup.ts` · `components/BackupPanel.tsx`（入口在 `screens/settings/StorageScreen.tsx`）；与 WebDAV 同步并存，本地文件备份不依赖任何服务 |
+| 同步（WebDAV） | `features/webdav/`：`client.ts`（PROPFIND / MKCOL / GET / PUT） · `state.ts`（方向判定与状态文案，纯函数） · `engine.ts`（整包上传下载 + 冲突裁决） · `credentials.ts`（密码进 Keystore） · `useWebDavSync.ts`（接 React） · `screens/settings/WebDavSyncScreen.tsx`；本地键 `webdav-state:v1`；测试 `test:webdav-sync` |
+| 账户（登录 / Session / SecureStore；上游实现，本 Fork 未接线） | `features/account/`：`authClient.ts`（Better Auth HTTP + Web Cookie / Android Bearer） · `useAccount.ts` · `secureStore.ts` + `secretStore.ts`（Keystore 与 Secret 水合） · `mobileCallback.ts`（`newsnook://auth/callback`） · `screenModel.ts`（页面状态机） |
+| 云同步（客户端；上游实现，本 Fork 未接线） | `features/sync/`：`projection.ts`（本地态 → 同步实体） · `reconcile.ts`（影子对账 + Outbox） · `SyncEngine.ts`（push/pull/apply/退避） · `merge.ts` · `runtimeAdapter.ts` + `useCloudSync.ts`（接 React） · `notifier.ts`（Toast / 通知分寸） · `firstSync.ts` · `devices.ts` |
+| 云同步（服务端与协议；上游实现，本 Fork 未接线） | `cloud/`（Fastify + PostgreSQL + Better Auth；push 用 `sync_heads ... FOR UPDATE` 行锁串行化） · `packages/contracts/`（zod schema；`./protocol` 子路径供客户端免 zod 引用）；部署见 [`docs/cloud-deploy.md`](./docs/cloud-deploy.md)，规格见 [`docs/superpowers/specs/2026-08-27-account-cloud-sync-design.md`](./docs/superpowers/specs/2026-08-27-account-cloud-sync-design.md) |
 | 阅读位置记忆 | `lib/readingPosition.ts`（`newsnook:reading-pos`；滚动与墨水屏分页共用一张表） |
 | 分享 / 阅读器溢出菜单 | `lib/shareToken.ts`（v2 token 编解码，App 与边缘 worker 共用） · `lib/shareLink.ts`（站内短链 `news.aizeek.com/a/<token>` 组装 + 深链冷启动） · `lib/articleId.ts`（收发两端共用的条目 id 规则） · `lib/shareArticle.ts` · `components/ShareArticleSheet.tsx` · `components/ReaderMoreMenu.tsx` · `components/EinkReaderMenu.tsx` · `functions/lib/shareCard.ts`（爬虫抓 `/a/*` 时的 Open Graph 卡片） |
 | 本地离线搜索 | `lib/localSearch.ts` · `screens/settings/LocalSearchScreen.tsx`（与 `web-catalog` 的联网站内搜索无关） |
@@ -196,7 +197,10 @@ npm run test:local-search
 npm run test:recommend
 npm run test:product-tour
 
-# 账户与云同步（客户端）
+# 同步（WebDAV）
+npm run test:webdav-sync
+
+# 账户与云同步（客户端；上游实现，本 Fork 未接线）
 npm run test:sync-projection
 npm run test:sync-engine
 npm run test:account-auth

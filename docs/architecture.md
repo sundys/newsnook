@@ -476,7 +476,45 @@ GET /a/<token>/og.png[?src=<上游首图>]   ← 卡片首图的同域端点（�
 
 策略：小配置同步镜像到 Capacitor Preferences；大列表/正文只走 localStorage。启动顺序：`hydrateNativeStorage` + `applyNativeChrome` → 再 mount React。
 
-### 8.9 账户与云同步（可选）
+### 8.9 同步（WebDAV，可选）
+
+本 Fork 的设置页「同步（WebDAV）」把配置整包放进用户自己的网盘，不依赖任何 NewsNook 服务端。
+代码：`src/features/webdav/`（`client.ts` 传输 · `state.ts` 判定纯函数 · `engine.ts` 编排 · `credentials.ts` 密码保管 · `useWebDavSync.ts` 接 React）
+· `src/screens/settings/WebDavSyncScreen.tsx` · 本地键 `webdav-state:v1`（地址、账号、两侧指纹、上次同步时间；**不含密码**）。
+
+**同步单元**：一整份 `lib/backup.ts` 的 `BackupPayload`，落在 `<用户填写的目录>/newsnook/backup.json`。
+不拆实体、不做服务端合并——网盘只是文件存储，整包比较与整包替换最简单也最可预期。
+
+| 同步 | 不同步 |
+|---|---|
+| 偏好与自建订阅、场景预设、启用信源 | 正文、列表/正文缓存、预存正文 |
+| 稍后读、已读标记、阅读位置 | 设备本地项（`einkMode`、`wifiOnlyAutoLoadMedia`、`prestore`） |
+| | Secret（API Key、代理密码）：网盘是明文文件存储，上传前用 `stripSecrets` 清空 |
+
+**方向判定**（`state.ts` 的 `decideWebDavSync`，纯函数）：比两侧「内容指纹」而不是时间戳，
+只有导出时间不同不算改动。网盘没有文件 → 直接上传；只有一侧变了 → 单向上传/下载；
+两侧都变了 → 交给用户裁决；没有本地基线（首次启用但网盘已有文件）→ 也让用户选，绝不自动覆盖。
+冲突弹窗按 `exportedAt` 给出倾向，两份时间接近时不表态。
+
+**覆盖保护**：任何覆盖本机的动作都先 `captureSyncSafetySnapshot`（`lib/backup.ts`，快照范围与同步范围一致），
+页面可整包回滚。写回顺序是先记基线再应用远端，避免刚拉下来的内容被当成「本机改动」再推回去。
+
+**触发**：冷启动（已配置）、本机配置指纹变化后 debounce 3s、回到前台、网络恢复、手动。
+无轮询。未配置地址时不创建引擎、不发任何请求。
+
+**传输**：Android 走 `ProxiedHttp` 原生桥（可发 PROPFIND / MKCOL 等自定义动词，可选用户代理隧道）；
+Web 走 `fetch`（CORS 由网盘服务端决定）。只有代理模式为 `always` 时才套隧道——
+智能分流会把局域网网盘误送去境外代理。
+
+**凭证**：密码只进 Keystore（`credentials.ts` → `SecureStorePlugin`），普通存储里为空串，日志只有动词与主机名；
+网页版没有等价安全存储，密码只留当前页面内存，刷新后需重新输入。
+
+**通知**：同步失败与待裁决冲突复用 `features/sync/nativeNotification.ts` 的通知渠道，落地页为 `webdav-sync`。
+
+### 8.9.1 账户与云同步（NewsNook Cloud，本 Fork 未接线）
+
+以下为上游实现，代码仍保留在仓库（`features/account/`、`features/sync/`、`cloud/`、`packages/contracts/`），
+但本 Fork 的设置页不再提供登录入口；阅读链路与 WebDAV 同步都不依赖它。
 
 规格全文见 [账户与云同步设计](./superpowers/specs/2026-08-27-account-cloud-sync-design.md)；实现计划见 [账户与云同步计划](./superpowers/plans/2026-08-27-account-cloud-sync.md)。
 
@@ -514,7 +552,7 @@ packages/contracts/       共享协议与错误码（`./protocol` 子路径免 z
 push 成功后写回影子，delta pull 的记录经 apply journal 落地（崩溃后重放），
 再由 `runtimeAdapter` 写回 React 状态。应用远端记录时不产生反向 mutation，避免两台设备互相对推。
 
-**同步触发**：启动（已登录）、本地投影指纹变化后 debounce 1.5s、回到前台、网络恢复、手动。
+**同步触发**（上游云同步，本 Fork 未接线）：启动（已登录）、本地投影指纹变化后 debounce 1.5s、回到前台、网络恢复、手动。
 无轮询、无 WebSocket。失败按指数退避 + 抖动重试，429 遵守 `Retry-After`，401/403 直接暂停并提示重新登录。
 
 **首次同步闸门**：`LocalSyncState.firstSyncCompleted` 为 false 时日常同步不会跑，
@@ -704,7 +742,8 @@ npm run android:apk | android:aab
 | 正文缓存 | `src/lib/bodyCache.ts` |
 | 持久化 | `src/lib/storage.ts` |
 | 配置备份 | `src/lib/backup.ts` · `src/components/BackupPanel.tsx` |
-| 账户 / 云同步 | `src/features/account/` · `src/features/sync/` · `src/screens/settings/AccountSyncScreen.tsx` · `src/components/SyncToast.tsx` · `cloud/` · `packages/contracts/` · [部署](./cloud-deploy.md) · [设计](./superpowers/specs/2026-08-27-account-cloud-sync-design.md) |
+| 同步（WebDAV） | `src/features/webdav/` · `src/screens/settings/WebDavSyncScreen.tsx` · 本地键 `webdav-state:v1` · 密码走 `features/account/secureStore` 同一套 Keystore |
+| 账户 / 云同步（上游，本 Fork 未接线） | `src/features/account/` · `src/features/sync/` · `src/screens/settings/AccountSyncScreen.tsx` · `cloud/` · `packages/contracts/` · [部署](./cloud-deploy.md) · [设计](./superpowers/specs/2026-08-27-account-cloud-sync-design.md) |
 | 阅读位置 | `src/lib/readingPosition.ts` |
 | 分享 | `src/lib/shareLink.ts` · `src/lib/shareToken.ts` · `src/lib/articleId.ts` · `src/lib/shareArticle.ts` · `src/components/ShareArticleSheet.tsx` · `functions/lib/shareCard.ts` |
 | 本地搜索 | `src/lib/localSearch.ts` · `src/screens/settings/LocalSearchScreen.tsx` |

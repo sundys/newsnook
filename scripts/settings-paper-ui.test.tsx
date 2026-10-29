@@ -29,7 +29,7 @@ const html = renderToStaticMarkup(createElement(MeScreen, {
   aiSummary: '服务商与功能模型',
   proxySummary: '直连',
   storageSummary: '预存与缓存',
-  accountSummary: '未登录',
+  syncSummary: '未配置 · 本地阅读不受影响',
   onOpenLater: noop,
   onOpenHistory: noop,
   onOpenLocalSearch: noop,
@@ -45,7 +45,7 @@ const html = renderToStaticMarkup(createElement(MeScreen, {
   onOpenAiSettings: noop,
   onOpenProxySettings: noop,
   onOpenStorageSettings: noop,
-  onOpenAccountSync: noop,
+  onOpenSyncSettings: noop,
   onOpenAbout: noop,
 }))
 const { document } = parseHTML(html)
@@ -54,7 +54,7 @@ assert.ok(root, '实际设置页必须使用隔离样式根')
 assert.equal(document.querySelectorAll('.paper-settings-group').length, 4)
 assert.equal(document.querySelectorAll('button').length, 17, '保留全部十七个真实业务入口')
 assert.equal(document.querySelectorAll('.paper-settings-item').length, 15)
-for (const label of ['稍后读', '最近阅读', '本地搜索', 'RSS 订阅商店', '自定义订阅与 OPML', '分类与自动刷新', '场景预设', '阅读字体', '外观', '翻译', '划词百科', '朗读', 'AI', '网络与代理', '离线存储与备份', '账户与同步', '关于有所闻']) {
+for (const label of ['稍后读', '最近阅读', '本地搜索', 'RSS 订阅商店', '自定义订阅与 OPML', '分类与自动刷新', '场景预设', '阅读字体', '外观', '翻译', '划词百科', '朗读', 'AI', '网络与代理', '离线存储与备份', '同步（WebDAV）', '关于有所闻']) {
   assert.ok([...document.querySelectorAll('button')].some((button) => button.textContent?.includes(label)),
     `入口不可丢失：${label}`)
 }
@@ -70,7 +70,7 @@ const handlers = [
   'onOpenCustomSources', 'onOpenCategories', 'onOpenPresets',
   'onOpenTypographySettings', 'onOpenAppearanceSettings',
   'onOpenTranslationSettings', 'onOpenWikiSettings', 'onOpenReadAloudSettings', 'onOpenAiSettings',
-  'onOpenProxySettings', 'onOpenStorageSettings', 'onOpenAccountSync', 'onOpenAbout',
+  'onOpenProxySettings', 'onOpenStorageSettings', 'onOpenSyncSettings', 'onOpenAbout',
 ]
 for (const handler of handlers) {
   assert.match(source, new RegExp('onClick=\\{' + handler + '\\}'), `入口必须连接真实回调：${handler}`)

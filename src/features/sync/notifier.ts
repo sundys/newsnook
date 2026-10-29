@@ -145,8 +145,8 @@ export interface SyncNotificationModel {
   id: SyncNotificationId
   title: string
   body: string
-  /** 点开通知时要落到的页面；目前只有「账户与同步」 */
-  route: 'account-sync'
+  /** 点开通知时要落到的页面：账户与云同步，或 WebDAV 同步 */
+  route: 'account-sync' | 'webdav-sync'
 }
 
 export type AppVisibility = 'foreground' | 'background'

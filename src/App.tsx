@@ -12,15 +12,22 @@ import { OpenInAppBanner } from './components/OpenInAppBanner'
 import { DesktopSidebar } from './components/DesktopSidebar'
 import { TabBar, type TabKey } from './components/TabBar'
 import { SchemeOnboardingPrompt } from './components/SchemeOnboardingPrompt'
-import { SyncOnboardingPrompt } from './features/account/SyncOnboardingPrompt'
-import { useAccount } from './features/account/useAccount'
+import { SyncOnboardingPrompt } from './features/webdav/SyncOnboardingPrompt'
 import { syncRouteFromAppUrl } from './features/sync/nativeNotification'
-import { toastForSyncEvent, syncStatusCaption, type SyncToastModel } from './features/sync/notifier'
-import { useCloudSync } from './features/sync/useCloudSync'
-import { SyncToast } from './components/SyncToast'
+import { WebDavSyncEngine } from './features/webdav/engine'
+import { useWebDavSync } from './features/webdav/useWebDavSync'
+import {
+  keepDeviceLocalPreferences,
+  normalizeWebDavState,
+  webDavStatusCaption,
+} from './features/webdav/state'
+import type { WebDavStatus, WebDavSyncState } from './features/webdav/state'
 import { useFeeds } from './hooks/useFeeds'
 import { usePreferences } from './hooks/usePreferences'
 import { sanitizeForPersistence } from './features/account/secretStore'
+import { collectBackup } from './lib/backup'
+import { fingerprintOf } from './features/sync/fingerprint'
+import { stripSecrets } from './features/sync/projection'
 import { saveSubscriptionState } from './lib/storage'
 import { usePresets } from './hooks/usePresets'
 import {
@@ -64,10 +71,12 @@ import {
   listCacheStats,
   loadEnabledSources,
   loadIdSet,
+  loadWebDavState,
   markSchemeOnboardingSeen,
   markSyncOnboardingSeen,
   saveEnabledSources,
   saveIdSet,
+  saveWebDavState,
 } from './lib/storage'
 import { chineseDate } from './lib/time'
 import type { Article } from './lib/types'
@@ -99,7 +108,11 @@ import {
 import { resolveAiFeatureConfig } from './features/translation/aiConfig'
 import { readAloudEngineLabel } from './features/readAloud/config'
 import { FAVORITES_CATEGORY_ID, RECOMMEND_CATEGORY_ID, type CategoryId } from './sources/categories'
-import { applySnapshotToPrefs, removeSourcesFromPresets } from './sources/presets'
+import {
+  applySnapshotToPrefs,
+  normalizePresetsState,
+  removeSourcesFromPresets,
+} from './sources/presets'
 import {
   FOLLOWS_ENABLED_SOURCES,
   FONT_FAMILY_OPTIONS,
@@ -143,6 +156,7 @@ import {
   visibleCategories,
   withFavoriteCategory,
   withRecommendCategory,
+  normalizePreferences,
   type TypographyPrefs,
 } from './sources/preferences'
 import { SITES, SOURCES, findSite, findSource, makeCustomSourceId } from './sources/registry'
@@ -158,7 +172,7 @@ const SiteScreen = lazy(() => import('./screens/SiteScreen').then(module => ({ d
 const UpdateDialog = lazy(() => import('./features/appUpdate/UpdateDialog').then(module => ({ default: module.UpdateDialog })))
 
 const AboutScreen = lazy(() => import('./screens/settings/AboutScreen').then(module => ({ default: module.AboutScreen })))
-const AccountSyncScreen = lazy(() => import('./screens/settings/AccountSyncScreen').then(module => ({ default: module.AccountSyncScreen })))
+const WebDavSyncScreen = lazy(() => import('./screens/settings/WebDavSyncScreen').then(module => ({ default: module.WebDavSyncScreen })))
 const ChangelogScreen = lazy(() => import('./screens/settings/ChangelogScreen').then(module => ({ default: module.ChangelogScreen })))
 const OpenSourceScreen = lazy(() => import('./screens/settings/OpenSourceScreen').then(module => ({ default: module.OpenSourceScreen })))
 const AppearanceScreen = lazy(() => import('./screens/settings/AppearanceScreen').then(module => ({ default: module.AppearanceScreen })))
@@ -248,7 +262,7 @@ type SettingsRoute =
   | { name: 'later' }
   | { name: 'history' }
   | { name: 'local-search' }
-  | { name: 'account-sync' }
+  | { name: 'webdav-sync' }
   | { name: 'about' }
   | { name: 'changelog' }
   | { name: 'licenses' }
@@ -379,34 +393,6 @@ export default function App() {
     updatePrefs: update,
     setEnabledIds,
   })
-  /**
-   * 账户与云同步都是纯附加能力：未登录时 `useCloudSync` 不创建引擎、不发任何请求，
-   * 下面所有阅读、解析、缓存逻辑与它们完全解耦。
-   */
-  const account = useAccount()
-  const syncRuntime = useMemo(
-    () => ({ prefs, enabledIds, presets: presets.state }),
-    [prefs, enabledIds, presets.state],
-  )
-  const [syncToast, setSyncToast] = useState<SyncToastModel | null>(null)
-  const handleSyncEvent = useCallback((event: Parameters<typeof toastForSyncEvent>[0]) => {
-    const toast = toastForSyncEvent(event)
-    if (toast) setSyncToast(toast)
-  }, [])
-  const cloudSync = useCloudSync({
-    account: account.status === 'authenticated' ? account.adapter : null,
-    authenticated: account.status === 'authenticated',
-    runtime: syncRuntime,
-    replacePreferences,
-    replaceEnabledIds: setEnabledIds,
-    replacePresets: presets.replaceFromSync,
-    onEvent: handleSyncEvent,
-  })
-  const [syncOnboardingSeen, setSyncOnboardingSeen] = useState(() => hasSeenSyncOnboarding())
-  const dismissSyncOnboarding = useCallback(() => {
-    markSyncOnboardingSeen()
-    setSyncOnboardingSeen(true)
-  }, [])
   const [schemeOnboardingSeen, setSchemeOnboardingSeen] = useState(() => hasSeenSchemeOnboarding())
   const schemeOnboardingCloserRef = useRef<(() => boolean) | null>(null)
   const confirmSchemeOnboarding = useCallback(
@@ -421,9 +407,9 @@ export default function App() {
     markSchemeOnboardingSeen()
     setSchemeOnboardingSeen(true)
   }, [])
-  const openAccountSync = useCallback(() => {
+  const openWebDavSync = useCallback(() => {
     setTab('me')
-    setSettingsRoute({ name: 'account-sync' })
+    setSettingsRoute({ name: 'webdav-sync' })
   }, [])
   /**
    * 冷启动深链 `/a/<token>`：本地解码后直接进阅读器（正文仍走 resolveBody 站内抽取）。
@@ -495,6 +481,10 @@ export default function App() {
   /** 推荐排序经 ref 读取已读集合：打开文章返回时不重排，避免列表跳动 */
   const readIdsRef = useRef(readIds)
   readIdsRef.current = readIds
+  /** 网盘同步下来的已读整包替换；写入仍走既有 saveIdSet 路径 */
+  const replaceReadIds = useCallback((next: Set<string>) => {
+    setReadIds(next)
+  }, [])
   const [readingHistory, setReadingHistory] = useState<ReadingHistoryEntry[]>(() => listReadingHistory())
   const [historyLinuxDoTarget, setHistoryLinuxDoTarget] = useState<LinuxDoTopicSummary | null>(null)
   const [historyZhihuTarget, setHistoryZhihuTarget] = useState<ZhihuEntityRef | null>(null)
@@ -510,7 +500,109 @@ export default function App() {
     if (!cacheSnapshotReadyRef.current) return
     setCacheSnapshot(readCacheSnapshot())
   }, [])
-  const { later, laterRef, toggleLater, removeLater } = useLaterArticles(notifyCacheChange)
+  const { later, laterRef, toggleLater, removeLater, replaceFromSync: replaceLater } =
+    useLaterArticles(notifyCacheChange)
+
+  /**
+   * WebDAV 同步是纯附加能力：没配置地址时不创建引擎、不发任何请求，
+   * 下面所有阅读、解析、缓存逻辑与它完全解耦。
+   */
+  const [webDavState, setWebDavState] = useState<WebDavSyncState>(() =>
+    normalizeWebDavState(loadWebDavState()),
+  )
+  /** 配置变化后递增，让同步 hook 重建引擎并重连 */
+  const [webDavConfigVersion, setWebDavConfigVersion] = useState(0)
+  const updateWebDavState = useCallback((patch: Partial<WebDavSyncState>) => {
+    setWebDavState((prev) => {
+      const next = { ...prev, ...patch }
+      // 换了服务器或账号，旧基线不再可信：清掉指纹，下一次同步重新判定方向
+      const endpointChanged =
+        (patch.baseUrl !== undefined && patch.baseUrl !== prev.baseUrl) ||
+        (patch.username !== undefined && patch.username !== prev.username)
+      if (endpointChanged) {
+        next.localFingerprint = ''
+        next.remoteFingerprint = ''
+      }
+      saveWebDavState(next)
+      return next
+    })
+    setWebDavConfigVersion((version) => version + 1)
+  }, [])
+  /** 本机配置的内容指纹：变了就说明用户改了东西，值得推一次网盘 */
+  const webDavLocalKey = useMemo(
+    () => fingerprintOf({ prefs, enabledIds, presets: presets.state }),
+    [prefs, enabledIds, presets.state],
+  )
+  /**
+   * 网盘内容写回运行时：同步域的三块（偏好 / 启用信源 / 场景预设）走 React state，
+   * 稍后读与已读这类集合走各自已有的持久化路径，正文缓存不需要重建。
+   */
+  const webDavRuntimeRef = useRef({
+    replacePreferences,
+    replacePresets: presets.replaceFromSync,
+    replaceLater,
+    replaceReadIds,
+  })
+  webDavRuntimeRef.current = {
+    replacePreferences,
+    replacePresets: presets.replaceFromSync,
+    replaceLater,
+    replaceReadIds,
+  }
+  /** 应用网盘配置时要用「此刻」的本机偏好，保留设备本地设置 */
+  const prefsRef = useRef(prefs)
+  prefsRef.current = prefs
+  const webDavEngineFactory = useCallback(
+    (onStatus: (status: WebDavStatus) => void) =>
+      new WebDavSyncEngine(
+        {
+          /**
+           * 备份采集总是读「此刻」的配置，不能是创建引擎时的闭包快照。
+           * 落网盘前清空所有 API Key / 代理密码：网盘是明文文件存储，
+           * 不像 NewsNook Cloud 那样有服务端加密；密钥仍留在本机 Keystore。
+           */
+          collect: () => {
+            const payload = collectBackup(__APP_VERSION__)
+            if (payload.data.preferences != null) {
+              payload.data.preferences = stripSecrets(normalizePreferences(payload.data.preferences))
+            }
+            return payload
+          },
+          applyRemote: async (payload) => {
+            const runtime = webDavRuntimeRef.current
+            if (payload.data.preferences != null) {
+              // 墨水屏、仅 Wi-Fi 加载、预存策略跟着硬件与本机容量走，网盘不覆盖它们
+              runtime.replacePreferences(
+                keepDeviceLocalPreferences(
+                  normalizePreferences(payload.data.preferences),
+                  prefsRef.current,
+                ),
+              )
+            }
+            // 整包语义：远端缺这一段就表示「那边是空的」，不能留着本机旧值
+            setEnabledIds(payload.data.enabledSources ?? [])
+            if (payload.data.presets != null) {
+              const normalized = normalizePresetsState(payload.data.presets)
+              if (normalized) runtime.replacePresets(normalized)
+            }
+            runtime.replaceLater(payload.data.laterItems ?? [])
+            runtime.replaceReadIds(new Set(payload.data.readIds ?? []))
+          },
+        },
+        { onStatus },
+      ),
+    [],
+  )
+  const webDav = useWebDavSync({
+    configVersion: webDavConfigVersion,
+    localChangeKey: webDavLocalKey,
+    engineFactory: webDavEngineFactory,
+  })
+  const [syncOnboardingSeen, setSyncOnboardingSeen] = useState(() => hasSeenSyncOnboarding())
+  const dismissSyncOnboarding = useCallback(() => {
+    markSyncOnboardingSeen()
+    setSyncOnboardingSeen(true)
+  }, [])
 
   useEffect(() => {
     const needsSnapshot =
@@ -1025,9 +1117,10 @@ export default function App() {
       lastHandledUrl = trimmed
       lastHandledAt = now
 
-      // 1. 同步通知点开后落到「账户与同步」，不是分享深链
+      // 1. 同步通知点开后落到同步页，不是分享深链。
+      //    `account-sync` 是老通知残留的深链，账户入口已下线，统一落到 WebDAV 同步。
       if (syncRouteFromAppUrl(trimmed)) {
-        openAccountSync()
+        openWebDavSync()
         return
       }
 
@@ -1074,7 +1167,7 @@ export default function App() {
       disposed = true
       if (removeListener) void removeListener()
     }
-  }, [openAccountSync, openArticle])
+  }, [openWebDavSync, openArticle])
 
   /**
    * 「在 App 中打开」引导条：网页版打开分享深链、且是 Android 浏览器时才给。
@@ -1113,13 +1206,13 @@ export default function App() {
     tab === 'today' && !prestore.restored,
   )
   /**
-   * 同步介绍只在功能引导之后、首页无遮挡时露一次面，且只对未登录用户。
+   * 同步介绍只在功能引导之后、首页无遮挡时露一次面，且只对还没配置同步的用户。
    * 它是可选加分项，不参与 driver.js 的引导流程，两个按钮都会记下「看过」。
    */
   const showSyncOnboarding =
     !syncOnboardingSeen &&
     schemeOnboardingSeen &&
-    account.status === 'anonymous' &&
+    !webDav.configured &&
     hasSeenProductTour() &&
     tab === 'today' &&
     !reading &&
@@ -1736,14 +1829,24 @@ export default function App() {
       )
     }
 
-    if (settingsRoute.name === 'account-sync') {
+    if (settingsRoute.name === 'webdav-sync') {
       return (
-        <AccountSyncScreen
-          account={account}
-          sync={cloudSync}
-          runtime={syncRuntime}
-          onBack={() => setSettingsRoute(null)}
-        />
+        <Suspense fallback={null}>
+          <WebDavSyncScreen
+            state={webDavState}
+            status={webDav.status}
+            onStateChange={updateWebDavState}
+            onTestConnection={async () => {
+              await webDav.testConnection()
+            }}
+            onSyncNow={webDav.syncNow}
+            onResolve={webDav.resolveConflict}
+            onDismissConflict={webDav.dismissConflict}
+            onForceUpload={webDav.forceUpload}
+            onForceDownload={webDav.forceDownload}
+            onBack={() => setSettingsRoute(null)}
+          />
+        </Suspense>
       )
     }
 
@@ -1869,8 +1972,8 @@ export default function App() {
           aiSummary={aiSummary}
           proxySummary={proxySummary}
           storageSummary={storageSummary}
-          accountSummary={syncStatusCaption(cloudSync.status, {
-            authenticated: account.status === 'authenticated',
+          syncSummary={webDavStatusCaption(webDav.status, {
+            configured: webDav.configured,
           })}
           hasUpdate={appUpdate.hasUpdate}
           availableVersion={appUpdate.availableVersion}
@@ -1890,7 +1993,7 @@ export default function App() {
           onOpenAiSettings={() => setSettingsRoute({ name: 'ai' })}
           onOpenProxySettings={() => setSettingsRoute({ name: 'proxy' })}
           onOpenStorageSettings={() => setSettingsRoute({ name: 'storage' })}
-          onOpenAccountSync={() => setSettingsRoute({ name: 'account-sync' })}
+          onOpenSyncSettings={() => setSettingsRoute({ name: 'webdav-sync' })}
           onOpenAbout={() => setSettingsRoute({ name: 'about' })}
         />
       )
@@ -2203,20 +2306,12 @@ export default function App() {
 
       <SyncOnboardingPrompt
         open={showSyncOnboarding}
-        onSignIn={() => {
+        onOpenSync={() => {
           dismissSyncOnboarding()
-          openAccountSync()
+          openWebDavSync()
         }}
         onDismiss={dismissSyncOnboarding}
       />
-
-      {/* 阅读器盖在最上层时不打扰，等回到列表再说 */}
-      <SyncToast
-        toast={reading ? null : syncToast}
-        onDismiss={() => setSyncToast(null)}
-        onAction={openAccountSync}
-      />
-
 
       <ConfirmDialog
         open={deepLinkError}
@@ -2227,14 +2322,18 @@ export default function App() {
         onConfirm={dismissDeepLinkError}
         onCancel={dismissDeepLinkError}
       />
-      <UpdateDialog
-        open={appUpdate.dialogOpen}
-        release={appUpdate.dialogRelease}
-        localVersion={appUpdate.localVersion}
-        onUpdate={appUpdate.onUpdate}
-        onLater={appUpdate.onLater}
-        onSkip={appUpdate.onSkip}
-      />
+      {appUpdate.dialogOpen && appUpdate.dialogRelease && (
+        <Suspense fallback={null}>
+          <UpdateDialog
+            open={appUpdate.dialogOpen}
+            release={appUpdate.dialogRelease}
+            localVersion={appUpdate.localVersion}
+            onUpdate={appUpdate.onUpdate}
+            onLater={appUpdate.onLater}
+            onSkip={appUpdate.onSkip}
+          />
+        </Suspense>
+      )}
       <ConfirmDialog
         open={appUpdate.installPermissionOpen}
         title="需要安装权限"

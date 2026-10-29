@@ -27,6 +27,8 @@ export const SYNC_ONBOARDING_KEY = 'sync-onboarding-seen'
 export const SCHEME_ONBOARDING_KEY = 'scheme-onboarding-seen'
 /** 首次同步基线选择前的本机快照，只落 localStorage（见 lib/backup.ts） */
 export const SYNC_SAFETY_SNAPSHOT_KEY = 'sync-safety-snapshot:v1'
+/** WebDAV 同步设置与本地基线；密码不在这里，见 features/webdav/credentials.ts */
+export const WEBDAV_STATE_KEY = 'webdav-state:v1'
 
 /**
  * 冷启动只镜像这些键。列表/正文缓存已是 localOnly，其余键延后清理即可。
@@ -44,6 +46,7 @@ const BOOTSTRAP_MIRROR_KEYS = [
   'appUpdate',
   SYNC_STATE_KEY,
   SYNC_JOURNAL_KEY,
+  WEBDAV_STATE_KEY,
   DEVICE_ID_KEY,
   SYNC_ONBOARDING_KEY,
   SCHEME_ONBOARDING_KEY,
@@ -320,6 +323,18 @@ export function savePersistedDeviceId(deviceId: string): void {
 
 export function clearSyncState(): void {
   removeKeys([SYNC_STATE_KEY, SYNC_JOURNAL_KEY])
+}
+
+export function loadWebDavState(): unknown {
+  return read<unknown>(WEBDAV_STATE_KEY, null)
+}
+
+export function saveWebDavState(state: unknown): void {
+  write(WEBDAV_STATE_KEY, state)
+}
+
+export function clearWebDavState(): void {
+  removeKeys([WEBDAV_STATE_KEY])
 }
 
 export function loadSyncJournal(): unknown {

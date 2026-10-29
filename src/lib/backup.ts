@@ -304,14 +304,13 @@ export async function restoreBackup(
 }
 
 /**
- * 首次同步前的安全快照。
+ * 覆盖本机前的安全快照。
  *
- * 「使用云端数据」这类选择会整包替换同步域，用户后悔了得有地方找回来。
- * 只抓同步范围内的三块（偏好 / 场景预设 / 启用信源）——稍后读、已读、
- * 阅读历史与阅读位置本来就不参与同步，不会被覆盖，也就不必快照。
+ * WebDAV 同步按整份备份对齐（偏好 / 预设 / 启用信源 / 稍后读 / 已读 / 阅读位置），
+ * 所以快照也必须覆盖同样六个分区，否则「恢复同步前配置」会漏掉一半数据。
  * 只保留最近一份，避免把 localStorage 撑爆。
  */
-export const SYNC_SAFETY_SECTIONS: BackupSection[] = ['preferences', 'presets', 'enabledSources']
+export const SYNC_SAFETY_SECTIONS: BackupSection[] = [...BACKUP_SECTIONS]
 
 export interface SyncSafetySnapshot {
   createdAt: number
@@ -319,15 +318,9 @@ export interface SyncSafetySnapshot {
 }
 
 export function captureSyncSafetySnapshot(appVersion?: string): SyncSafetySnapshot {
-  const full = collectBackup(appVersion)
-  const data: BackupData = {}
-  if (full.data.preferences != null) data.preferences = full.data.preferences
-  if (full.data.presets != null) data.presets = full.data.presets
-  if (full.data.enabledSources?.length) data.enabledSources = full.data.enabledSources
-
   const snapshot: SyncSafetySnapshot = {
     createdAt: Date.now(),
-    payload: { ...full, data },
+    payload: collectBackup(appVersion),
   }
   saveSyncSafetySnapshot(snapshot)
   log.sync.info('captured pre-sync safety snapshot')

@@ -39,7 +39,7 @@ interface Props {
   aiSummary: string
   proxySummary: string
   storageSummary: string
-  accountSummary: string
+  syncSummary: string
   hasUpdate?: boolean
   availableVersion?: string
   onOpenLater: () => void
@@ -57,7 +57,7 @@ interface Props {
   onOpenAiSettings: () => void
   onOpenProxySettings: () => void
   onOpenStorageSettings: () => void
-  onOpenAccountSync: () => void
+  onOpenSyncSettings: () => void
   onOpenAbout: () => void
   /** 从阅读中区进入时：显示返回并回到原文 */
   onBackToReading?: () => void
@@ -103,7 +103,7 @@ export function MeScreen({
   aiSummary,
   proxySummary,
   storageSummary,
-  accountSummary,
+  syncSummary,
   hasUpdate,
   availableVersion,
   onOpenLater,
@@ -121,7 +121,7 @@ export function MeScreen({
   onOpenAiSettings,
   onOpenProxySettings,
   onOpenStorageSettings,
-  onOpenAccountSync,
+  onOpenSyncSettings,
   onOpenAbout,
   onBackToReading,
 }: Props) {
@@ -162,7 +162,7 @@ export function MeScreen({
           <Entry icon={ServerCog} title="AI" subtitle={aiSummary} onClick={onOpenAiSettings}/>
           <Entry icon={Globe} title="网络与代理" subtitle={proxySummary} onClick={onOpenProxySettings}/>
           <Entry icon={Database} title="离线存储与备份" subtitle={storageSummary} onClick={onOpenStorageSettings}/>
-          <Entry icon={CloudUpload} title="账户与同步" subtitle={accountSummary} onClick={onOpenAccountSync}/>
+          <Entry icon={CloudUpload} title="同步（WebDAV）" subtitle={syncSummary} onClick={onOpenSyncSettings}/>
           <Entry icon={Info} title="关于有所闻" subtitle={hasUpdate && availableVersion ? `发现新版本 v${availableVersion}` : `v${__APP_VERSION__}`} badge={hasUpdate ? 'NEW' : null} onClick={onOpenAbout} dataTour="me-about"/>
         </Group>
         <footer className="paper-settings-footer">
